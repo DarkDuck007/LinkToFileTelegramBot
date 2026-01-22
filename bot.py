@@ -35,6 +35,7 @@ class Job:
     chat_id: int
     url: str
     status_message_id: int
+    username: str | None
 
 
 class ThrottledEditor:
@@ -163,7 +164,7 @@ async def download_with_progress(
 
 async def upload_with_progress(
     user_client: TelegramClient,
-    chat_id: int,
+    target: object,
     file_path: Path,
     editor: ThrottledEditor,
 ) -> None:
@@ -180,7 +181,7 @@ async def upload_with_progress(
         )
 
     await user_client.send_file(
-        chat_id,
+        target,
         file_path,
         caption=f"Uploaded: {file_path.name}",
         progress_callback=progress_callback,
@@ -198,6 +199,15 @@ async def process_job(
     try:
         async with global_semaphore:
             async with per_user_semaphore[job.user_id]:
+                target = await resolve_upload_target(user_client, job)
+                if target is None:
+                    await editor.update(
+                        "Cannot message you from the user account. Please start a chat "
+                        "with the user account (or ensure you have a public username), "
+                        "then try again.",
+                        force=True,
+                    )
+                    return
                 header_name, content_type = await probe_response_meta(job.url)
                 rc = await download_with_progress(job.url, output_path, editor)
                 if rc != 0:
@@ -219,7 +229,7 @@ async def process_job(
                     target_path = job_dir / f"{stem}-{uuid.uuid4().hex}{suffix}"
                 output_path.rename(target_path)
                 await editor.update("Uploading...", force=True)
-                await upload_with_progress(user_client, job.chat_id, target_path, editor)
+                await upload_with_progress(user_client, target, target_path, editor)
                 await editor.update("Done.", force=True)
     except Exception as exc:
         await editor.update(f"Error: {exc}", force=True)
@@ -248,6 +258,20 @@ def extract_url(text: str) -> str | None:
     return match.group(1)
 
 
+async def resolve_upload_target(
+    user_client: TelegramClient, job: Job
+) -> object | None:
+    if job.username:
+        try:
+            return await user_client.get_input_entity(job.username)
+        except (ValueError, RPCError):
+            pass
+    try:
+        return await user_client.get_input_entity(job.user_id)
+    except (ValueError, RPCError):
+        return None
+
+
 async def main() -> None:
     if shutil.which("wget") is None:
         raise RuntimeError("wget not found in PATH.")
@@ -272,6 +296,8 @@ async def main() -> None:
         url = extract_url(text)
         if not url:
             return
+        sender = await event.get_sender()
+        username = sender.username if sender else None
         user_id = event.sender_id
         if pending_by_user[user_id] >= MAX_PENDING_PER_USER:
             await event.reply("You already have 3 pending downloads. Please wait.")
@@ -287,6 +313,7 @@ async def main() -> None:
             chat_id=event.chat_id,
             url=url,
             status_message_id=status_message.id,
+            username=username,
         )
         await queue.put(job)
 
