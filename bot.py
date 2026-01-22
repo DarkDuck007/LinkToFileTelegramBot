@@ -61,18 +61,6 @@ per_user_semaphore: dict[int, asyncio.Semaphore] = defaultdict(
 global_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
 
-async def run_wget(url: str, output_path: Path) -> int:
-    process = await asyncio.create_subprocess_exec(
-        "wget",
-        "-O",
-        str(output_path),
-        url,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    return await process.wait()
-
-
 def bytes_to_mb(value: int) -> float:
     return round(value / (1024 * 1024), 2)
 
@@ -80,11 +68,47 @@ def bytes_to_mb(value: int) -> float:
 def filename_from_url(url: str) -> str:
     parsed = urlparse(url)
     basename = Path(unquote(parsed.path)).name
-    if not basename:
-        basename = "download"
     basename = re.sub(r'[<>:"/\\\\|?*]', "_", basename)
     basename = basename.strip(" .")
-    return basename or "download"
+    return basename
+
+
+def filename_from_header(value: str) -> str | None:
+    match = re.search(r"filename\*=([^']*)''([^;]+)", value, flags=re.IGNORECASE)
+    if match:
+        return unquote(match.group(2))
+    match = re.search(r'filename="([^"]+)"', value, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+    match = re.search(r"filename=([^;]+)", value, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip().strip('"')
+    return None
+
+
+async def probe_filename(url: str) -> str | None:
+    process = await asyncio.create_subprocess_exec(
+        "wget",
+        "--server-response",
+        "--spider",
+        "--max-redirect=20",
+        url,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await process.communicate()
+    if process.returncode != 0 or not stderr:
+        return None
+    headers = stderr.decode(errors="ignore")
+    header_lines = [
+        line for line in headers.splitlines() if "content-disposition" in line.lower()
+    ]
+    for line in reversed(header_lines):
+        value = line.split(":", 1)[-1].strip()
+        name = filename_from_header(value)
+        if name:
+            return name
+    return None
 
 
 async def download_with_progress(
@@ -92,18 +116,26 @@ async def download_with_progress(
 ) -> int:
     process = await asyncio.create_subprocess_exec(
         "wget",
+        "--progress=dot:mega",
         "-O",
         str(output_path),
         url,
         stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
-    wait_task = asyncio.create_task(process.wait())
-    while not wait_task.done():
-        await asyncio.sleep(PROGRESS_INTERVAL_SECONDS)
-        size = output_path.stat().st_size if output_path.exists() else 0
-        await editor.update(f"Downloading... {bytes_to_mb(size)} MB")
-    return await wait_task
+    last_update = 0.0
+    percent_re = re.compile(r"(\d+)%")
+    while True:
+        line = await process.stderr.readline()
+        if not line:
+            break
+        decoded = line.decode(errors="ignore")
+        match = percent_re.search(decoded)
+        now = time.monotonic()
+        if match and now - last_update >= PROGRESS_INTERVAL_SECONDS:
+            last_update = now
+            await editor.update(f"Downloading... {match.group(1)}%")
+    return await process.wait()
 
 
 async def upload_with_progress(
@@ -143,11 +175,18 @@ async def process_job(
     try:
         async with global_semaphore:
             async with per_user_semaphore[job.user_id]:
+                header_name = await probe_filename(job.url)
                 rc = await download_with_progress(job.url, output_path, editor)
                 if rc != 0:
                     await editor.update("Download failed.", force=True)
                     return
-                target_name = filename_from_url(job.url)
+                url_name = filename_from_url(job.url)
+                header_name = (
+                    re.sub(r'[<>:"/\\\\|?*]', "_", header_name).strip(" .")
+                    if header_name
+                    else ""
+                )
+                target_name = url_name or header_name or "untitled"
                 target_path = job_dir / target_name
                 if target_path.exists():
                     stem = target_path.stem or "download"
