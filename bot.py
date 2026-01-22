@@ -17,6 +17,7 @@ API_ID = int(os.environ["TELETHON_API_ID"])
 API_HASH = os.environ["TELETHON_API_HASH"]
 SESSION = os.environ.get("TELETHON_SESSION", "userbot")
 BOT_TOKEN = os.environ["TELETHON_BOT_TOKEN"]
+BOT_USERNAME = os.environ.get("TELETHON_BOT_USERNAME")
 USER_PHONE = os.environ["TELETHON_PHONE"]
 USER_PASSWORD = os.environ.get("TELETHON_PASSWORD")
 DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", "downloads"))
@@ -35,7 +36,6 @@ class Job:
     chat_id: int
     url: str
     status_message_id: int
-    username: str | None
 
 
 class ThrottledEditor:
@@ -62,6 +62,8 @@ per_user_semaphore: dict[int, asyncio.Semaphore] = defaultdict(
     lambda: asyncio.Semaphore(MAX_PENDING_PER_USER)
 )
 global_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+bot_upload_target: str | None = None
+user_self_id: int | None = None
 
 
 def bytes_to_mb(value: int) -> float:
@@ -188,6 +190,22 @@ async def upload_with_progress(
     )
 
 
+async def relay_via_bot(
+    bot_client: TelegramClient,
+    user_client: TelegramClient,
+    job: Job,
+    file_path: Path,
+) -> None:
+    if not bot_upload_target or user_self_id is None:
+        raise RuntimeError("Bot relay is not configured.")
+    upload_message = await user_client.send_file(bot_upload_target, file_path)
+    user_entity = await bot_client.get_input_entity(user_self_id)
+    bot_message = await bot_client.get_messages(user_entity, ids=upload_message.id)
+    if not bot_message or not bot_message.media:
+        raise RuntimeError("Bot relay failed to access uploaded media.")
+    await bot_client.forward_messages(job.chat_id, bot_message, as_copy=True)
+
+
 async def process_job(
     bot_client: TelegramClient, user_client: TelegramClient, job: Job
 ) -> None:
@@ -199,14 +217,8 @@ async def process_job(
     try:
         async with global_semaphore:
             async with per_user_semaphore[job.user_id]:
-                target = await resolve_upload_target(user_client, job)
-                if target is None:
-                    await editor.update(
-                        "Cannot message you from the user account. Please start a chat "
-                        "with the user account (or ensure you have a public username), "
-                        "then try again.",
-                        force=True,
-                    )
+                if not bot_upload_target:
+                    await editor.update("Bot relay is not configured.", force=True)
                     return
                 header_name, content_type = await probe_response_meta(job.url)
                 rc = await download_with_progress(job.url, output_path, editor)
@@ -229,7 +241,8 @@ async def process_job(
                     target_path = job_dir / f"{stem}-{uuid.uuid4().hex}{suffix}"
                 output_path.rename(target_path)
                 await editor.update("Uploading...", force=True)
-                await upload_with_progress(user_client, target, target_path, editor)
+                await upload_with_progress(user_client, bot_upload_target, target_path, editor)
+                await relay_via_bot(bot_client, user_client, job, target_path)
                 await editor.update("Done.", force=True)
     except Exception as exc:
         await editor.update(f"Error: {exc}", force=True)
@@ -258,20 +271,6 @@ def extract_url(text: str) -> str | None:
     return match.group(1)
 
 
-async def resolve_upload_target(
-    user_client: TelegramClient, job: Job
-) -> object | None:
-    if job.username:
-        try:
-            return await user_client.get_input_entity(job.username)
-        except (ValueError, RPCError):
-            pass
-    try:
-        return await user_client.get_input_entity(job.user_id)
-    except (ValueError, RPCError):
-        return None
-
-
 async def main() -> None:
     if shutil.which("wget") is None:
         raise RuntimeError("wget not found in PATH.")
@@ -282,6 +281,14 @@ async def main() -> None:
     await bot_client.start(bot_token=BOT_TOKEN)
     user_client = TelegramClient(SESSION, API_ID, API_HASH)
     await user_client.start(phone=USER_PHONE, password=USER_PASSWORD)
+    bot_me = await bot_client.get_me()
+    user_me = await user_client.get_me()
+    bot_username = BOT_USERNAME or bot_me.username
+    if not bot_username:
+        raise RuntimeError("Bot username is required for relay.")
+    global bot_upload_target, user_self_id
+    bot_upload_target = bot_username
+    user_self_id = user_me.id
 
     for _ in range(MAX_CONCURRENT_DOWNLOADS):
         asyncio.create_task(worker(bot_client, user_client))
@@ -296,8 +303,6 @@ async def main() -> None:
         url = extract_url(text)
         if not url:
             return
-        sender = await event.get_sender()
-        username = sender.username if sender else None
         user_id = event.sender_id
         if pending_by_user[user_id] >= MAX_PENDING_PER_USER:
             await event.reply("You already have 3 pending downloads. Please wait.")
@@ -313,7 +318,6 @@ async def main() -> None:
             chat_id=event.chat_id,
             url=url,
             status_message_id=status_message.id,
-            username=username,
         )
         await queue.put(job)
 
