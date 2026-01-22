@@ -8,6 +8,7 @@ Set environment variables:
 
 - `TELETHON_API_ID`
 - `TELETHON_API_HASH`
+- `TELETHON_BOT_TOKEN`
 - `TELETHON_SESSION` (string session or session file name, default: `userbot`)
 - `DOWNLOAD_DIR` (optional, default: `downloads`)
 
@@ -27,3 +28,4 @@ python bot.py
 
 - Max 10 concurrent downloads, max 3 pending per user, queue size 100.
 - Replies to `ping` or `/ping` with `Pong!`.
+- Bot account receives links; user session is used only for uploads.

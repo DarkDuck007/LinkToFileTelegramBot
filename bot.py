@@ -12,9 +12,10 @@ from telethon import TelegramClient, events
 from telethon.errors import RPCError
 
 
-API_ID = int(os.environ["TELETHO_API_ID"])
+API_ID = int(os.environ["TELETHON_API_ID"])
 API_HASH = os.environ["TELETHON_API_HASH"]
 SESSION = os.environ.get("TELETHON_SESSION", "userbot")
+BOT_TOKEN = os.environ["TELETHON_BOT_TOKEN"]
 DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", "downloads"))
 
 MAX_CONCURRENT_DOWNLOADS = 10
@@ -95,7 +96,10 @@ async def download_with_progress(
 
 
 async def upload_with_progress(
-    client: TelegramClient, chat_id: int, file_path: Path, editor: ThrottledEditor
+    user_client: TelegramClient,
+    chat_id: int,
+    file_path: Path,
+    editor: ThrottledEditor,
 ) -> None:
     last_update = 0.0
 
@@ -109,7 +113,7 @@ async def upload_with_progress(
             f"Uploading... {bytes_to_mb(current)} / {bytes_to_mb(total)} MB"
         )
 
-    await client.send_file(
+    await user_client.send_file(
         chat_id,
         file_path,
         caption=f"Uploaded: {file_path.name}",
@@ -117,8 +121,10 @@ async def upload_with_progress(
     )
 
 
-async def process_job(client: TelegramClient, job: Job) -> None:
-    editor = ThrottledEditor(client, job.chat_id, job.status_message_id)
+async def process_job(
+    bot_client: TelegramClient, user_client: TelegramClient, job: Job
+) -> None:
+    editor = ThrottledEditor(bot_client, job.chat_id, job.status_message_id)
     output_path = DOWNLOAD_DIR / f"{uuid.uuid4().hex}"
     await editor.update("Starting download...", force=True)
     try:
@@ -129,7 +135,7 @@ async def process_job(client: TelegramClient, job: Job) -> None:
                     await editor.update("Download failed.", force=True)
                     return
                 await editor.update("Uploading...", force=True)
-                await upload_with_progress(client, job.chat_id, output_path, editor)
+                await upload_with_progress(user_client, job.chat_id, output_path, editor)
                 await editor.update("Done.", force=True)
     except Exception as exc:
         await editor.update(f"Error: {exc}", force=True)
@@ -142,11 +148,11 @@ async def process_job(client: TelegramClient, job: Job) -> None:
         pending_by_user[job.user_id] = max(0, pending_by_user[job.user_id] - 1)
 
 
-async def worker(client: TelegramClient) -> None:
+async def worker(bot_client: TelegramClient, user_client: TelegramClient) -> None:
     while True:
         job = await queue.get()
         try:
-            await process_job(client, job)
+            await process_job(bot_client, user_client, job)
         finally:
             queue.task_done()
 
@@ -164,13 +170,15 @@ async def main() -> None:
 
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-    client = TelegramClient(SESSION, API_ID, API_HASH)
-    await client.start()
+    bot_client = TelegramClient("bot", API_ID, API_HASH)
+    await bot_client.start(bot_token=BOT_TOKEN)
+    user_client = TelegramClient(SESSION, API_ID, API_HASH)
+    await user_client.start()
 
     for _ in range(MAX_CONCURRENT_DOWNLOADS):
-        asyncio.create_task(worker(client))
+        asyncio.create_task(worker(bot_client, user_client))
 
-    @client.on(events.NewMessage(incoming=True))
+    @bot_client.on(events.NewMessage(incoming=True))
     async def handler(event: events.NewMessage.Event) -> None:
         text = (event.raw_text or "").strip()
         lowered = text.lower()
@@ -198,8 +206,8 @@ async def main() -> None:
         )
         await queue.put(job)
 
-    print("Userbot is running.")
-    await client.run_until_disconnected()
+    print("Bot is running. User client ready for uploads.")
+    await bot_client.run_until_disconnected()
 
 
 if __name__ == "__main__":
