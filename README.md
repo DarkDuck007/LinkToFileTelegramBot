@@ -9,6 +9,8 @@ Set environment variables:
 - `TELETHON_API_ID`
 - `TELETHON_API_HASH`
 - `TELETHON_BOT_TOKEN`
+- `TELETHON_PHONE` (user account phone number, with country code)
+- `TELETHON_PASSWORD` (optional, for 2FA)
 - `TELETHON_SESSION` (string session or session file name, default: `userbot`)
 - `DOWNLOAD_DIR` (optional, default: `downloads`)
 

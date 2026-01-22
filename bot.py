@@ -17,6 +17,8 @@ API_ID = int(os.environ["TELETHON_API_ID"])
 API_HASH = os.environ["TELETHON_API_HASH"]
 SESSION = os.environ.get("TELETHON_SESSION", "userbot")
 BOT_TOKEN = os.environ["TELETHON_BOT_TOKEN"]
+USER_PHONE = os.environ["TELETHON_PHONE"]
+USER_PASSWORD = os.environ.get("TELETHON_PASSWORD")
 DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", "downloads"))
 
 MAX_CONCURRENT_DOWNLOADS = 10
@@ -232,7 +234,7 @@ async def main() -> None:
     bot_client = TelegramClient("bot", API_ID, API_HASH)
     await bot_client.start(bot_token=BOT_TOKEN)
     user_client = TelegramClient(SESSION, API_ID, API_HASH)
-    await user_client.start()
+    await user_client.start(phone=USER_PHONE, password=USER_PASSWORD)
 
     for _ in range(MAX_CONCURRENT_DOWNLOADS):
         asyncio.create_task(worker(bot_client, user_client))
