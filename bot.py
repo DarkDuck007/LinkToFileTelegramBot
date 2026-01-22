@@ -7,6 +7,7 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from telethon import TelegramClient, events
 from telethon.errors import RPCError
@@ -76,6 +77,16 @@ def bytes_to_mb(value: int) -> float:
     return round(value / (1024 * 1024), 2)
 
 
+def filename_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    basename = Path(unquote(parsed.path)).name
+    if not basename:
+        basename = "download"
+    basename = re.sub(r'[<>:"/\\\\|?*]', "_", basename)
+    basename = basename.strip(" .")
+    return basename or "download"
+
+
 async def download_with_progress(
     url: str, output_path: Path, editor: ThrottledEditor
 ) -> int:
@@ -125,7 +136,9 @@ async def process_job(
     bot_client: TelegramClient, user_client: TelegramClient, job: Job
 ) -> None:
     editor = ThrottledEditor(bot_client, job.chat_id, job.status_message_id)
-    output_path = DOWNLOAD_DIR / f"{uuid.uuid4().hex}"
+    job_dir = DOWNLOAD_DIR / uuid.uuid4().hex
+    job_dir.mkdir(parents=True, exist_ok=True)
+    output_path = job_dir / "download.tmp"
     await editor.update("Starting download...", force=True)
     try:
         async with global_semaphore:
@@ -134,15 +147,22 @@ async def process_job(
                 if rc != 0:
                     await editor.update("Download failed.", force=True)
                     return
+                target_name = filename_from_url(job.url)
+                target_path = job_dir / target_name
+                if target_path.exists():
+                    stem = target_path.stem or "download"
+                    suffix = target_path.suffix
+                    target_path = job_dir / f"{stem}-{uuid.uuid4().hex}{suffix}"
+                output_path.rename(target_path)
                 await editor.update("Uploading...", force=True)
-                await upload_with_progress(user_client, job.chat_id, output_path, editor)
+                await upload_with_progress(user_client, job.chat_id, target_path, editor)
                 await editor.update("Done.", force=True)
     except Exception as exc:
         await editor.update(f"Error: {exc}", force=True)
     finally:
-        if output_path.exists():
+        if job_dir.exists():
             try:
-                output_path.unlink()
+                shutil.rmtree(job_dir)
             except OSError:
                 pass
         pending_by_user[job.user_id] = max(0, pending_by_user[job.user_id] - 1)
