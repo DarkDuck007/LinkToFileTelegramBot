@@ -88,7 +88,7 @@ def filename_from_header(value: str) -> str | None:
     return None
 
 
-async def probe_filename(url: str) -> str | None:
+async def probe_response_meta(url: str) -> tuple[str | None, str | None]:
     process = await asyncio.create_subprocess_exec(
         "wget",
         "--server-response",
@@ -100,7 +100,7 @@ async def probe_filename(url: str) -> str | None:
     )
     _, stderr = await process.communicate()
     if process.returncode != 0 or not stderr:
-        return None
+        return None, None
     headers = stderr.decode(errors="ignore")
     header_lines = [
         line for line in headers.splitlines() if "content-disposition" in line.lower()
@@ -109,8 +109,29 @@ async def probe_filename(url: str) -> str | None:
         value = line.split(":", 1)[-1].strip()
         name = filename_from_header(value)
         if name:
-            return name
-    return None
+            return name, None
+    content_type = None
+    type_lines = [
+        line for line in headers.splitlines() if "content-type" in line.lower()
+    ]
+    for line in reversed(type_lines):
+        content_type = line.split(":", 1)[-1].strip().lower()
+        break
+    return None, content_type
+
+
+def apply_html_extension(name: str, content_type: str | None) -> str:
+    if not name:
+        return name
+    if Path(name).suffix:
+        return name
+    if not content_type:
+        return name
+    if content_type.startswith("text/html") or content_type.startswith(
+        "application/xhtml+xml"
+    ):
+        return f"{name}.html"
+    return name
 
 
 async def download_with_progress(
@@ -177,7 +198,7 @@ async def process_job(
     try:
         async with global_semaphore:
             async with per_user_semaphore[job.user_id]:
-                header_name = await probe_filename(job.url)
+                header_name, content_type = await probe_response_meta(job.url)
                 rc = await download_with_progress(job.url, output_path, editor)
                 if rc != 0:
                     await editor.update("Download failed.", force=True)
@@ -188,6 +209,8 @@ async def process_job(
                     if header_name
                     else ""
                 )
+                url_name = apply_html_extension(url_name, content_type)
+                header_name = apply_html_extension(header_name, content_type)
                 target_name = url_name or header_name or "untitled"
                 target_path = job_dir / target_name
                 if target_path.exists():
