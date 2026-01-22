@@ -169,7 +169,7 @@ async def upload_with_progress(
     target: object,
     file_path: Path,
     editor: ThrottledEditor,
-) -> None:
+) -> object:
     last_update = 0.0
 
     async def progress_callback(current: int, total: int) -> None:
@@ -182,7 +182,7 @@ async def upload_with_progress(
             f"Uploading... {bytes_to_mb(current)} / {bytes_to_mb(total)} MB"
         )
 
-    await user_client.send_file(
+    return await user_client.send_file(
         target,
         file_path,
         caption=f"Uploaded: {file_path.name}",
@@ -192,15 +192,13 @@ async def upload_with_progress(
 
 async def relay_via_bot(
     bot_client: TelegramClient,
-    user_client: TelegramClient,
     job: Job,
-    file_path: Path,
+    upload_message_id: int,
 ) -> None:
-    if not bot_upload_target or user_self_id is None:
+    if user_self_id is None:
         raise RuntimeError("Bot relay is not configured.")
-    upload_message = await user_client.send_file(bot_upload_target, file_path)
     user_entity = await bot_client.get_input_entity(user_self_id)
-    bot_message = await bot_client.get_messages(user_entity, ids=upload_message.id)
+    bot_message = await bot_client.get_messages(user_entity, ids=upload_message_id)
     if not bot_message or not bot_message.media:
         raise RuntimeError("Bot relay failed to access uploaded media.")
     await bot_client.forward_messages(job.chat_id, bot_message, as_copy=True)
@@ -241,8 +239,10 @@ async def process_job(
                     target_path = job_dir / f"{stem}-{uuid.uuid4().hex}{suffix}"
                 output_path.rename(target_path)
                 await editor.update("Uploading...", force=True)
-                await upload_with_progress(user_client, bot_upload_target, target_path, editor)
-                await relay_via_bot(bot_client, user_client, job, target_path)
+                upload_message = await upload_with_progress(
+                    user_client, bot_upload_target, target_path, editor
+                )
+                await relay_via_bot(bot_client, job, upload_message.id)
                 await editor.update("Done.", force=True)
     except Exception as exc:
         await editor.update(f"Error: {exc}", force=True)
