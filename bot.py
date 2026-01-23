@@ -197,6 +197,16 @@ async def relay_via_bot(
 ) -> None:
     if user_self_id is None:
         raise RuntimeError("Bot relay is not configured.")
+    try:
+        await bot_client.forward_messages(
+            job.chat_id,
+            upload_message_id,
+            from_peer=user_self_id,
+            as_copy=True,
+        )
+        return
+    except RPCError:
+        pass
     user_entity = await bot_client.get_input_entity(user_self_id)
     bot_message = await bot_client.get_messages(user_entity, ids=upload_message_id)
     if not bot_message or not bot_message.media:
@@ -242,7 +252,12 @@ async def process_job(
                 upload_message = await upload_with_progress(
                     user_client, bot_upload_target, target_path, editor
                 )
-                await relay_via_bot(bot_client, job, upload_message.id)
+                upload_message_id = (
+                    upload_message[0].id
+                    if isinstance(upload_message, list)
+                    else upload_message.id
+                )
+                await relay_via_bot(bot_client, job, upload_message_id)
                 await editor.update("Done.", force=True)
     except Exception as exc:
         await editor.update(f"Error: {exc}", force=True)
