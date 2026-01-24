@@ -119,6 +119,8 @@ async def probe_response_meta(url: str) -> tuple[str | None, str | None, int | N
         "--server-response",
         "--spider",
         "--max-redirect=20",
+        "--connect-timeout=30",
+        "--read-timeout=30",
         url,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
