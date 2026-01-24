@@ -120,6 +120,7 @@ async def probe_response_meta(url: str) -> tuple[str | None, str | None, int | N
         "--spider",
         "--max-redirect=20",
         "--timeout=10",
+        "--tries=2",
         url,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
@@ -178,6 +179,7 @@ async def download_with_progress(
         "wget",
         "--progress=dot:mega",
         "--timeout=10",
+        "--tries=2",
         "-O",
         str(output_path),
         url,
@@ -228,7 +230,7 @@ async def upload_with_progress(
     target: object,
     file_path: Path,
     editor: ThrottledEditor,
-    caption: str,
+    caption: str | None,
 ) -> object:
     last_update = 0.0
 
@@ -242,19 +244,18 @@ async def upload_with_progress(
             f"Uploading... {bytes_to_mb(current)} / {bytes_to_mb(total)} MB"
         )
 
-    return await user_client.send_file(
-        target,
-        file_path,
-        caption=caption,
-        progress_callback=progress_callback,
-    )
+    kwargs: dict[str, object] = {"progress_callback": progress_callback}
+    if caption and caption.strip():
+        kwargs["caption"] = caption
+        kwargs["parse_mode"] = None
+    return await user_client.send_file(target, file_path, **kwargs)
 
 
 async def relay_via_bot(
     bot_client: TelegramClient,
     job: Job,
     upload_message_id: int,
-    caption: str,
+    caption: str | None,
 ) -> None:
     if user_self_id is None:
         raise RuntimeError("Bot relay is not configured.")
@@ -270,19 +271,19 @@ async def relay_via_bot(
 
 
 async def copy_message_via_bot_api(
-    chat_id: int, from_chat_id: int, message_id: int, caption: str
+    chat_id: int, from_chat_id: int, message_id: int, caption: str | None
 ) -> None:
     def _do_request() -> None:
         url = f"{BOT_API_URL.rstrip('/')}/bot{BOT_TOKEN}/copyMessage"
-        payload = urllib.parse.urlencode(
-            {
-                "chat_id": str(chat_id),
-                "from_chat_id": str(from_chat_id),
-                "message_id": str(message_id),
-                "caption": caption,
-                "parse_mode": "MarkdownV2",
-            }
-        ).encode()
+        data = {
+            "chat_id": str(chat_id),
+            "from_chat_id": str(from_chat_id),
+            "message_id": str(message_id),
+        }
+        if caption and caption.strip():
+            data["caption"] = caption
+            data["parse_mode"] = "MarkdownV2"
+        payload = urllib.parse.urlencode(data).encode()
         req = urllib.request.Request(url, data=payload)
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = resp.read().decode()
@@ -291,10 +292,6 @@ async def copy_message_via_bot_api(
             raise RuntimeError(data.get("description", "copyMessage failed"))
 
     await asyncio.to_thread(_do_request)
-
-
-def escape_markdown_v2(text: str) -> str:
-    return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", text)
 
 
 async def get_updates_via_bot_api(timeout_seconds: int = 5) -> list[dict]:
@@ -351,7 +348,7 @@ async def db_delete_hash(file_hash: str) -> None:
 
 
 async def find_bot_message_id(
-    filename: str, file_hash: str, timeout_seconds: int = 30
+    filename: str, file_hash: str, file_size: int, timeout_seconds: int = 30
 ) -> int | None:
     if user_self_id is None:
         return None
@@ -366,6 +363,12 @@ async def find_bot_message_id(
             document = message.get("document") or {}
             if document.get("file_name") == filename:
                 return message.get("message_id")
+            if document.get("file_size") == file_size:
+                return message.get("message_id")
+            photo = message.get("photo") or []
+            for size in photo:
+                if size.get("file_size") == file_size:
+                    return message.get("message_id")
             caption = message.get("caption") or ""
             if file_hash in caption or filename in caption:
                 return message.get("message_id")
@@ -429,20 +432,21 @@ async def process_job(
                     await editor.update("Download failed.", force=True)
                     return
                 cached_message_id = await db_get_message_id(file_hash)
-                caption = f" "
+                upload_caption = f"Uploaded: {target_path.name}\nHash: {file_hash}"
                 if cached_message_id is not None:
                     try:
-                        await relay_via_bot(bot_client, job, cached_message_id, caption)
+                        await relay_via_bot(
+                            bot_client, job, cached_message_id, None
+                        )
                         await editor.update("Done.", force=True)
                         return
                     except Exception as exc:
                         logger.exception("Cached relay failed: %s", exc)
                         await db_delete_hash(file_hash)
                 await editor.update("Uploading...", force=True)
-                #caption = f"Uploaded: {target_path.name}\nHash: {file_hash}"
-                caption = f" "
+                file_size = target_path.stat().st_size
                 upload_message = await upload_with_progress(
-                    user_client, bot_upload_target, target_path, editor, caption
+                    user_client, bot_upload_target, target_path, editor, upload_caption
                 )
                 upload_message_id = (
                     upload_message[0].id
@@ -450,7 +454,7 @@ async def process_job(
                     else upload_message.id
                 )
                 bot_message_id = await find_bot_message_id(
-                    target_path.name, file_hash
+                    target_path.name, file_hash, file_size
                 )
                 if bot_message_id is None:
                     logger.error(
@@ -460,7 +464,7 @@ async def process_job(
                     await editor.update("Download failed.", force=True)
                     return
                 await db_set_message_id(file_hash, bot_message_id)
-                await relay_via_bot(bot_client, job, bot_message_id, caption)
+                await relay_via_bot(bot_client, job, bot_message_id, None)
                 await editor.update("Done.", force=True)
     except Exception as exc:
         logger.exception("Job failed: %s", exc)
