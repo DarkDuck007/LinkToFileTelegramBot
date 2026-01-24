@@ -68,6 +68,8 @@ per_user_semaphore: dict[int, asyncio.Semaphore] = defaultdict(
 global_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 bot_upload_target: str | None = None
 user_self_id: int | None = None
+bot_api_offset = 0
+bot_api_lock = asyncio.Lock()
 
 
 def bytes_to_mb(value: int) -> float:
@@ -232,19 +234,43 @@ async def copy_message_via_bot_api(
     await asyncio.to_thread(_do_request)
 
 
-async def find_bot_message_id(
-    bot_client: TelegramClient, filename: str, timeout_seconds: int = 30
-) -> int | None:
+async def get_updates_via_bot_api(timeout_seconds: int = 5) -> list[dict]:
+    global bot_api_offset
+
+    def _do_request(offset: int) -> dict:
+        url = f"{BOT_API_URL.rstrip('/')}/bot{BOT_TOKEN}/getUpdates"
+        payload = urllib.parse.urlencode(
+            {"offset": str(offset), "timeout": str(timeout_seconds)}
+        ).encode()
+        req = urllib.request.Request(url, data=payload)
+        with urllib.request.urlopen(req, timeout=timeout_seconds + 10) as resp:
+            body = resp.read().decode()
+        return json.loads(body)
+
+    async with bot_api_lock:
+        data = await asyncio.to_thread(_do_request, bot_api_offset)
+        if not data.get("ok"):
+            raise RuntimeError(data.get("description", "getUpdates failed"))
+        results = data.get("result", [])
+        for update in results:
+            bot_api_offset = max(bot_api_offset, update.get("update_id", 0) + 1)
+        return results
+
+
+async def find_bot_message_id(filename: str, timeout_seconds: int = 30) -> int | None:
     if user_self_id is None:
         return None
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        messages = await bot_client.get_messages(user_self_id, limit=10)
-        for message in messages:
-            if message and message.file and message.file.name == filename:
-                return message.id
-            if message and message.media and message.text and filename in message.text:
-                return message.id
+        updates = await get_updates_via_bot_api(timeout_seconds=2)
+        for update in updates:
+            message = update.get("message") or {}
+            chat = message.get("chat") or {}
+            if chat.get("id") != user_self_id:
+                continue
+            document = message.get("document") or {}
+            if document.get("file_name") == filename:
+                return message.get("message_id")
         await asyncio.sleep(1)
     return None
 
@@ -292,9 +318,7 @@ async def process_job(
                     if isinstance(upload_message, list)
                     else upload_message.id
                 )
-                bot_message_id = await find_bot_message_id(
-                    bot_client, target_path.name
-                )
+                bot_message_id = await find_bot_message_id(target_path.name)
                 if bot_message_id is None:
                     await editor.update(
                         "Upload received, but bot could not see the file.",
