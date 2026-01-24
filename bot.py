@@ -119,8 +119,7 @@ async def probe_response_meta(url: str) -> tuple[str | None, str | None, int | N
         "--server-response",
         "--spider",
         "--max-redirect=20",
-        "--connect-timeout=10",
-        "--read-timeout=10",
+        "--timeout=10",
         url,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
@@ -178,8 +177,7 @@ async def download_with_progress(
     process = await asyncio.create_subprocess_exec(
         "wget",
         "--progress=dot:mega",
-        "--connect-timeout=30",
-        "--read-timeout=30",
+        "--timeout=10",
         "-O",
         str(output_path),
         url,
@@ -431,7 +429,7 @@ async def process_job(
                     await editor.update("Download failed.", force=True)
                     return
                 cached_message_id = await db_get_message_id(file_hash)
-                caption = f"File: `{escape_markdown_v2(target_path.name)}`"
+                caption = f" "
                 if cached_message_id is not None:
                     try:
                         await relay_via_bot(bot_client, job, cached_message_id, caption)
@@ -442,7 +440,7 @@ async def process_job(
                         await db_delete_hash(file_hash)
                 await editor.update("Uploading...", force=True)
                 #caption = f"Uploaded: {target_path.name}\nHash: {file_hash}"
-                caption = f"File: `{target_path.name}`"
+                caption = f" "
                 upload_message = await upload_with_progress(
                     user_client, bot_upload_target, target_path, editor, caption
                 )
