@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/home/danial/mahi/simplebot/LinkToFileTelegramBot
-ExecStart=/usr/bin/python3 /home/danial/mahi/simplebot/LinkToFileTelegramBot/bot.py
+ExecStart=/home/danial/mahi/mahienv/bin/python /home/danial/mahi/simplebot/LinkToFileTelegramBot/bot.py
 Restart=on-failure
 RestartSec=5
 Environment=TELETHON_API_ID=YOUR_API_ID

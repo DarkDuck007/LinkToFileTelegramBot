@@ -4,11 +4,13 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import sys
 import time
 import uuid
 import urllib.parse
 import urllib.request
+import hashlib
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +29,7 @@ BOT_API_URL = os.environ.get("BOT_API_URL", "https://api.telegram.org")
 USER_PHONE = os.environ["TELETHON_PHONE"]
 USER_PASSWORD = os.environ.get("TELETHON_PASSWORD")
 DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", "downloads"))
+DB_PATH = Path(os.environ.get("HASH_DB_PATH", "hash_cache.db"))
 
 MAX_CONCURRENT_DOWNLOADS = 10
 MAX_PENDING_PER_USER = 3
@@ -79,6 +82,8 @@ bot_upload_target: str | None = None
 user_self_id: int | None = None
 bot_api_offset = 0
 bot_api_lock = asyncio.Lock()
+db_lock = asyncio.Lock()
+db_conn: sqlite3.Connection | None = None
 
 
 def bytes_to_mb(value: int) -> float:
@@ -189,6 +194,17 @@ async def download_with_progress(
     return rc
 
 
+def compute_sha256(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
 async def upload_with_progress(
     user_client: TelegramClient,
     target: object,
@@ -276,6 +292,36 @@ async def get_updates_via_bot_api(timeout_seconds: int = 5) -> list[dict]:
         return results
 
 
+async def db_get_message_id(file_hash: str) -> int | None:
+    if db_conn is None:
+        return None
+    async with db_lock:
+        cursor = db_conn.execute(
+            "SELECT message_id FROM file_cache WHERE hash = ?", (file_hash,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+
+async def db_set_message_id(file_hash: str, message_id: int) -> None:
+    if db_conn is None:
+        return
+    async with db_lock:
+        db_conn.execute(
+            "INSERT OR REPLACE INTO file_cache(hash, message_id) VALUES(?, ?)",
+            (file_hash, message_id),
+        )
+        db_conn.commit()
+
+
+async def db_delete_hash(file_hash: str) -> None:
+    if db_conn is None:
+        return
+    async with db_lock:
+        db_conn.execute("DELETE FROM file_cache WHERE hash = ?", (file_hash,))
+        db_conn.commit()
+
+
 async def find_bot_message_id(filename: str, timeout_seconds: int = 30) -> int | None:
     if user_self_id is None:
         return None
@@ -329,6 +375,21 @@ async def process_job(
                     suffix = target_path.suffix
                     target_path = job_dir / f"{stem}-{uuid.uuid4().hex}{suffix}"
                 output_path.rename(target_path)
+                try:
+                    file_hash = compute_sha256(target_path)
+                except Exception as exc:
+                    logger.exception("Hashing failed: %s", exc)
+                    await editor.update("Download failed.", force=True)
+                    return
+                cached_message_id = await db_get_message_id(file_hash)
+                if cached_message_id is not None:
+                    try:
+                        await relay_via_bot(bot_client, job, cached_message_id)
+                        await editor.update("Done.", force=True)
+                        return
+                    except Exception as exc:
+                        logger.exception("Cached relay failed: %s", exc)
+                        await db_delete_hash(file_hash)
                 await editor.update("Uploading...", force=True)
                 upload_message = await upload_with_progress(
                     user_client, bot_upload_target, target_path, editor
@@ -346,6 +407,7 @@ async def process_job(
                     )
                     await editor.update("Download failed.", force=True)
                     return
+                await db_set_message_id(file_hash, bot_message_id)
                 await relay_via_bot(bot_client, job, bot_message_id)
                 await editor.update("Done.", force=True)
     except Exception as exc:
@@ -394,12 +456,23 @@ async def main() -> None:
     global bot_upload_target, user_self_id
     bot_upload_target = bot_username
     user_self_id = user_me.id
+    global db_conn
+    db_conn = sqlite3.connect(DB_PATH)
+    db_conn.execute(
+        "CREATE TABLE IF NOT EXISTS file_cache ("
+        "hash TEXT PRIMARY KEY,"
+        "message_id INTEGER NOT NULL)"
+    )
+    db_conn.execute("CREATE INDEX IF NOT EXISTS idx_file_cache_hash ON file_cache(hash)")
+    db_conn.commit()
 
     for _ in range(MAX_CONCURRENT_DOWNLOADS):
         asyncio.create_task(worker(bot_client, user_client))
 
     @bot_client.on(events.NewMessage(incoming=True))
     async def handler(event: events.NewMessage.Event) -> None:
+        if user_self_id is not None and event.sender_id == user_self_id:
+            return
         text = (event.raw_text or "").strip()
         lowered = text.lower()
         if lowered in {"ping", "/ping"}:
