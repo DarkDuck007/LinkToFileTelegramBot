@@ -200,7 +200,7 @@ async def relay_via_bot(
     user_entity = await bot_client.get_input_entity(user_self_id)
     for _ in range(10):
         try:
-            await bot_client.copy_messages(
+            await bot_client.copy_message(
                 job.chat_id,
                 upload_message_id,
                 from_peer=user_entity,
