@@ -202,7 +202,6 @@ async def relay_via_bot(
             job.chat_id,
             upload_message_id,
             from_peer=user_self_id,
-            as_copy=True,
         )
         return
     except RPCError:
@@ -211,7 +210,7 @@ async def relay_via_bot(
     bot_message = await bot_client.get_messages(user_entity, ids=upload_message_id)
     if not bot_message or not bot_message.media:
         raise RuntimeError("Bot relay failed to access uploaded media.")
-    await bot_client.forward_messages(job.chat_id, bot_message, as_copy=True)
+    await bot_client.forward_messages(job.chat_id, bot_message)
 
 
 async def process_job(
