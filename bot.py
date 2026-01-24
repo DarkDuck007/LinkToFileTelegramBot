@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import random
 import shutil
 import time
 import uuid
@@ -11,6 +12,7 @@ from urllib.parse import unquote, urlparse
 
 from telethon import TelegramClient, events
 from telethon.errors import RPCError
+from telethon.tl.functions.messages import CopyMessagesRequest
 
 
 API_ID = int(os.environ["TELETHON_API_ID"])
@@ -198,12 +200,16 @@ async def relay_via_bot(
     if user_self_id is None:
         raise RuntimeError("Bot relay is not configured.")
     user_entity = await bot_client.get_input_entity(user_self_id)
+    target_entity = await bot_client.get_input_entity(job.chat_id)
     for _ in range(10):
         try:
-            await bot_client.copy_message(
-                job.chat_id,
-                upload_message_id,
-                from_peer=user_entity,
+            await bot_client(
+                CopyMessagesRequest(
+                    from_peer=user_entity,
+                    id=[upload_message_id],
+                    to_peer=target_entity,
+                    random_id=[random.getrandbits(64)],
+                )
             )
             return
         except RPCError:
