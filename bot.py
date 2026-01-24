@@ -197,20 +197,28 @@ async def relay_via_bot(
 ) -> None:
     if user_self_id is None:
         raise RuntimeError("Bot relay is not configured.")
-    try:
-        await bot_client.forward_messages(
-            job.chat_id,
-            upload_message_id,
-            from_peer=user_self_id,
-        )
-        return
-    except RPCError:
-        pass
     user_entity = await bot_client.get_input_entity(user_self_id)
-    bot_message = await bot_client.get_messages(user_entity, ids=upload_message_id)
-    if not bot_message or not bot_message.media:
-        raise RuntimeError("Bot relay failed to access uploaded media.")
-    await bot_client.forward_messages(job.chat_id, bot_message)
+    for _ in range(10):
+        try:
+            await bot_client.forward_messages(
+                job.chat_id,
+                upload_message_id,
+                from_peer=user_entity,
+            )
+            return
+        except RPCError:
+            pass
+        bot_message = await bot_client.get_messages(user_entity, ids=upload_message_id)
+        if bot_message and bot_message.media:
+            await bot_client.forward_messages(job.chat_id, bot_message)
+            return
+        recent = await bot_client.get_messages(user_entity, limit=5)
+        for message in recent:
+            if message and message.media:
+                await bot_client.forward_messages(job.chat_id, message)
+                return
+        await asyncio.sleep(1)
+    raise RuntimeError("Bot relay failed to access uploaded media.")
 
 
 async def process_job(
