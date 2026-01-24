@@ -280,9 +280,8 @@ async def copy_message_via_bot_api(
             "from_chat_id": str(from_chat_id),
             "message_id": str(message_id),
         }
-        if caption and caption.strip():
+        if caption is not None:
             data["caption"] = caption
-            data["parse_mode"] = "MarkdownV2"
         payload = urllib.parse.urlencode(data).encode()
         req = urllib.request.Request(url, data=payload)
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -435,9 +434,7 @@ async def process_job(
                 upload_caption = f"Uploaded: {target_path.name}\nHash: {file_hash}"
                 if cached_message_id is not None:
                     try:
-                        await relay_via_bot(
-                            bot_client, job, cached_message_id, None
-                        )
+                        await relay_via_bot(bot_client, job, cached_message_id, "")
                         await editor.update("Done.", force=True)
                         return
                     except Exception as exc:
@@ -464,7 +461,7 @@ async def process_job(
                     await editor.update("Download failed.", force=True)
                     return
                 await db_set_message_id(file_hash, bot_message_id)
-                await relay_via_bot(bot_client, job, bot_message_id, None)
+                await relay_via_bot(bot_client, job, bot_message_id, "")
                 await editor.update("Done.", force=True)
     except Exception as exc:
         logger.exception("Job failed: %s", exc)
