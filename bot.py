@@ -35,6 +35,8 @@ MAX_CONCURRENT_DOWNLOADS = 10
 MAX_PENDING_PER_USER = 3
 MAX_QUEUE_SIZE = 100
 PROGRESS_INTERVAL_SECONDS = 20
+MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+SIZE_LIMIT_EXCEEDED = 3
 
 URL_RE = re.compile(r"(https?://\S+)")
 
@@ -193,6 +195,11 @@ async def download_with_progress(
         stderr_tail.append(decoded.strip())
         if len(stderr_tail) > 5:
             stderr_tail.pop(0)
+        if output_path.exists() and output_path.stat().st_size > MAX_UPLOAD_BYTES:
+            logger.error("wget exceeded size cap url=%s", url)
+            process.terminate()
+            await process.wait()
+            return SIZE_LIMIT_EXCEEDED
         match = percent_re.search(decoded)
         now = time.monotonic()
         if match and now - last_update >= PROGRESS_INTERVAL_SECONDS:
@@ -375,13 +382,19 @@ async def process_job(
                 header_name, content_type, content_length = await probe_response_meta(
                     job.url
                 )
-                if content_length is not None and content_length > 2 * 1024 * 1024 * 1024:
+                if content_length is not None and content_length > MAX_UPLOAD_BYTES:
                     await editor.update(
                         "I cannot upload files bigger than 2GB :(",
                         force=True,
                     )
                     return
                 rc = await download_with_progress(job.url, output_path, editor)
+                if rc == SIZE_LIMIT_EXCEEDED:
+                    await editor.update(
+                        "I cannot upload files bigger than 2GB :(",
+                        force=True,
+                    )
+                    return
                 if rc != 0:
                     await editor.update("Download failed.", force=True)
                     return
