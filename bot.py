@@ -149,6 +149,7 @@ async def download_with_progress(
     process = await asyncio.create_subprocess_exec(
         "wget",
         "--progress=dot:mega",
+        "--connect-timeout=30"
         "-O",
         str(output_path),
         url,
@@ -385,6 +386,7 @@ async def main() -> None:
             return
         url = extract_url(text)
         if not url:
+            await event.reply("Send me a link :3")
             return
         user_id = event.sender_id
         if pending_by_user[user_id] >= MAX_PENDING_PER_USER:
