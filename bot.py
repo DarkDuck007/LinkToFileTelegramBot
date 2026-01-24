@@ -1,8 +1,10 @@
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
+import sys
 import time
 import uuid
 import urllib.parse
@@ -32,6 +34,13 @@ MAX_QUEUE_SIZE = 100
 PROGRESS_INTERVAL_SECONDS = 20
 
 URL_RE = re.compile(r"(https?://\S+)")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    stream=sys.stderr,
+)
+logger = logging.getLogger("linktofile")
 
 
 @dataclass
@@ -149,7 +158,8 @@ async def download_with_progress(
     process = await asyncio.create_subprocess_exec(
         "wget",
         "--progress=dot:mega",
-        "--connect-timeout=30"
+        "--connect-timeout=30",
+        "--read-timeout=30",
         "-O",
         str(output_path),
         url,
@@ -158,17 +168,25 @@ async def download_with_progress(
     )
     last_update = 0.0
     percent_re = re.compile(r"(\d+)%")
+    stderr_tail: list[str] = []
     while True:
         line = await process.stderr.readline()
         if not line:
             break
         decoded = line.decode(errors="ignore")
+        stderr_tail.append(decoded.strip())
+        if len(stderr_tail) > 5:
+            stderr_tail.pop(0)
         match = percent_re.search(decoded)
         now = time.monotonic()
         if match and now - last_update >= PROGRESS_INTERVAL_SECONDS:
             last_update = now
             await editor.update(f"Downloading... {match.group(1)}%")
-    return await process.wait()
+    rc = await process.wait()
+    if rc != 0:
+        tail = " | ".join([line for line in stderr_tail if line])
+        logger.error("wget failed rc=%s url=%s tail=%s", rc, url, tail)
+    return rc
 
 
 async def upload_with_progress(
@@ -288,7 +306,8 @@ async def process_job(
         async with global_semaphore:
             async with per_user_semaphore[job.user_id]:
                 if not bot_upload_target:
-                    await editor.update("Bot relay is not configured.", force=True)
+                    logger.error("Bot relay is not configured.")
+                    await editor.update("Download failed.", force=True)
                     return
                 header_name, content_type = await probe_response_meta(job.url)
                 rc = await download_with_progress(job.url, output_path, editor)
@@ -321,15 +340,17 @@ async def process_job(
                 )
                 bot_message_id = await find_bot_message_id(target_path.name)
                 if bot_message_id is None:
-                    await editor.update(
-                        "Upload received, but bot could not see the file.",
-                        force=True,
+                    logger.error(
+                        "Bot could not see uploaded media filename=%s",
+                        target_path.name,
                     )
+                    await editor.update("Download failed.", force=True)
                     return
                 await relay_via_bot(bot_client, job, bot_message_id)
                 await editor.update("Done.", force=True)
     except Exception as exc:
-        await editor.update(f"Error: {exc}", force=True)
+        logger.exception("Job failed: %s", exc)
+        await editor.update("Download failed.", force=True)
     finally:
         if job_dir.exists():
             try:

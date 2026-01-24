@@ -1,0 +1,22 @@
+[Unit]
+Description=LinkToFile Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/danial/mahi/simplebot/LinkToFileTelegramBot
+ExecStart=/usr/bin/python3 /home/danial/mahi/simplebot/LinkToFileTelegramBot/bot.py
+Restart=on-failure
+RestartSec=5
+Environment=TELETHON_API_ID=YOUR_API_ID
+Environment=TELETHON_API_HASH=YOUR_API_HASH
+Environment=TELETHON_BOT_TOKEN=YOUR_BOT_TOKEN
+Environment=TELETHON_BOT_USERNAME=YOUR_BOT_USERNAME
+Environment=TELETHON_PHONE=YOUR_PHONE
+Environment=TELETHON_PASSWORD=YOUR_PASSWORD
+Environment=BOT_API_URL=https://api.telegram.org
+Environment=DOWNLOAD_DIR=/home/danial/mahi/simplebot/LinkToFileTelegramBot/downloads
+
+[Install]
+WantedBy=multi-user.target
