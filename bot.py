@@ -111,7 +111,7 @@ def filename_from_header(value: str) -> str | None:
     return None
 
 
-async def probe_response_meta(url: str) -> tuple[str | None, str | None]:
+async def probe_response_meta(url: str) -> tuple[str | None, str | None, int | None]:
     process = await asyncio.create_subprocess_exec(
         "wget",
         "--server-response",
@@ -123,7 +123,7 @@ async def probe_response_meta(url: str) -> tuple[str | None, str | None]:
     )
     _, stderr = await process.communicate()
     if process.returncode != 0 or not stderr:
-        return None, None
+        return None, None, None
     headers = stderr.decode(errors="ignore")
     header_lines = [
         line for line in headers.splitlines() if "content-disposition" in line.lower()
@@ -132,15 +132,26 @@ async def probe_response_meta(url: str) -> tuple[str | None, str | None]:
         value = line.split(":", 1)[-1].strip()
         name = filename_from_header(value)
         if name:
-            return name, None
+            return name, None, None
     content_type = None
+    content_length = None
     type_lines = [
         line for line in headers.splitlines() if "content-type" in line.lower()
     ]
     for line in reversed(type_lines):
         content_type = line.split(":", 1)[-1].strip().lower()
         break
-    return None, content_type
+    length_lines = [
+        line for line in headers.splitlines() if "content-length" in line.lower()
+    ]
+    for line in reversed(length_lines):
+        value = line.split(":", 1)[-1].strip()
+        try:
+            content_length = int(value)
+        except ValueError:
+            content_length = None
+        break
+    return None, content_type, content_length
 
 
 def apply_html_extension(name: str, content_type: str | None) -> str:
@@ -361,7 +372,15 @@ async def process_job(
                     logger.error("Bot relay is not configured.")
                     await editor.update("Download failed.", force=True)
                     return
-                header_name, content_type = await probe_response_meta(job.url)
+                header_name, content_type, content_length = await probe_response_meta(
+                    job.url
+                )
+                if content_length is not None and content_length > 2 * 1024 * 1024 * 1024:
+                    await editor.update(
+                        "I cannot upload files bigger than 2GB :(",
+                        force=True,
+                    )
+                    return
                 rc = await download_with_progress(job.url, output_path, editor)
                 if rc != 0:
                     await editor.update("Download failed.", force=True)
@@ -397,7 +416,8 @@ async def process_job(
                         logger.exception("Cached relay failed: %s", exc)
                         await db_delete_hash(file_hash)
                 await editor.update("Uploading...", force=True)
-                caption = f"Uploaded: {target_path.name}\nHash: {file_hash}"
+                #caption = f"Uploaded: {target_path.name}\nHash: {file_hash}"
+                caption = f"File: `{target_path.name}`"
                 upload_message = await upload_with_progress(
                     user_client, bot_upload_target, target_path, editor, caption
                 )
