@@ -1,29 +1,21 @@
 import asyncio
+import io
 import json
 import os
 import re
 import shutil
 import time
 import uuid
-import urllib.parse
-import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from telethon import TelegramClient, events
-from telethon.errors import RPCError
+import aiohttp
 
 
-API_ID = int(os.environ["TELETHON_API_ID"])
-API_HASH = os.environ["TELETHON_API_HASH"]
-SESSION = os.environ.get("TELETHON_SESSION", "userbot")
 BOT_TOKEN = os.environ["TELETHON_BOT_TOKEN"]
-BOT_USERNAME = os.environ.get("TELETHON_BOT_USERNAME")
-BOT_API_URL = os.environ.get("BOT_API_URL", "https://api.telegram.org")
-USER_PHONE = os.environ["TELETHON_PHONE"]
-USER_PASSWORD = os.environ.get("TELETHON_PASSWORD")
+BOT_API_URL = os.environ["BOT_API_URL"]
 DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", "downloads"))
 
 MAX_CONCURRENT_DOWNLOADS = 10
@@ -42,9 +34,52 @@ class Job:
     status_message_id: int
 
 
+class BotAPI:
+    def __init__(self, base_url: str, token: str, session: aiohttp.ClientSession) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._token = token
+        self._session = session
+
+    def _url(self, method: str) -> str:
+        return f"{self._base_url}/bot{self._token}/{method}"
+
+    async def request(self, method: str, **kwargs: object) -> dict:
+        async with self._session.post(self._url(method), **kwargs) as response:
+            response.raise_for_status()
+            payload = await response.json()
+            if not payload.get("ok"):
+                raise RuntimeError(payload.get("description", "Bot API error"))
+            return payload
+
+    async def get_updates(self, offset: int, timeout: int) -> list[dict]:
+        payload = await self.request(
+            "getUpdates", json={"offset": offset, "timeout": timeout}
+        )
+        return payload.get("result", [])
+
+    async def send_message(
+        self, chat_id: int, text: str, reply_to_message_id: int | None = None
+    ) -> dict:
+        data: dict[str, object] = {"chat_id": chat_id, "text": text}
+        if reply_to_message_id is not None:
+            data["reply_to_message_id"] = reply_to_message_id
+        payload = await self.request("sendMessage", json=data)
+        return payload["result"]
+
+    async def edit_message_text(self, chat_id: int, message_id: int, text: str) -> None:
+        await self.request(
+            "editMessageText",
+            json={"chat_id": chat_id, "message_id": message_id, "text": text},
+        )
+
+    async def send_document(self, data: aiohttp.FormData) -> dict:
+        payload = await self.request("sendDocument", data=data)
+        return payload["result"]
+
+
 class ThrottledEditor:
-    def __init__(self, client: TelegramClient, chat_id: int, message_id: int) -> None:
-        self._client = client
+    def __init__(self, api: BotAPI, chat_id: int, message_id: int) -> None:
+        self._api = api
         self._chat_id = chat_id
         self._message_id = message_id
         self._last_update = 0.0
@@ -54,10 +89,28 @@ class ThrottledEditor:
         if not force and now - self._last_update < PROGRESS_INTERVAL_SECONDS:
             return
         try:
-            await self._client.edit_message(self._chat_id, self._message_id, text)
-        except RPCError:
+            await self._api.edit_message_text(self._chat_id, self._message_id, text)
+        except Exception:
             return
         self._last_update = now
+
+
+class UploadState:
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self.sent = 0
+        self.done = asyncio.Event()
+
+
+class ProgressFile(io.BufferedReader):
+    def __init__(self, raw: io.BufferedReader, state: UploadState) -> None:
+        super().__init__(raw)
+        self._state = state
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = super().read(size)
+        self._state.sent += len(chunk)
+        return chunk
 
 
 queue: asyncio.Queue[Job] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
@@ -66,8 +119,6 @@ per_user_semaphore: dict[int, asyncio.Semaphore] = defaultdict(
     lambda: asyncio.Semaphore(MAX_PENDING_PER_USER)
 )
 global_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
-bot_upload_target: str | None = None
-user_self_id: int | None = None
 
 
 def bytes_to_mb(value: int) -> float:
@@ -169,73 +220,40 @@ async def download_with_progress(
 
 
 async def upload_with_progress(
-    user_client: TelegramClient,
-    target: object,
-    file_path: Path,
-    editor: ThrottledEditor,
-) -> object:
-    last_update = 0.0
-
-    async def progress_callback(current: int, total: int) -> None:
-        nonlocal last_update
-        now = time.monotonic()
-        if now - last_update < PROGRESS_INTERVAL_SECONDS:
-            return
-        last_update = now
-        await editor.update(
-            f"Uploading... {bytes_to_mb(current)} / {bytes_to_mb(total)} MB"
-        )
-
-    return await user_client.send_file(
-        target,
-        file_path,
-        caption=f"Uploaded: {file_path.name}",
-        progress_callback=progress_callback,
-    )
-
-
-async def relay_via_bot(
-    bot_client: TelegramClient,
-    job: Job,
-    upload_message_id: int,
+    api: BotAPI, job: Job, file_path: Path, editor: ThrottledEditor
 ) -> None:
-    if user_self_id is None:
-        raise RuntimeError("Bot relay is not configured.")
-    for _ in range(10):
-        try:
-            await copy_message_via_bot_api(job.chat_id, user_self_id, upload_message_id)
-            return
-        except Exception:
-            await asyncio.sleep(1)
-    raise RuntimeError("Bot relay failed to access uploaded media.")
+    total = file_path.stat().st_size
+    state = UploadState(total=total)
+
+    async def reporter() -> None:
+        while not state.done.is_set():
+            await asyncio.sleep(PROGRESS_INTERVAL_SECONDS)
+            await editor.update(
+                f"Uploading... {bytes_to_mb(state.sent)} / {bytes_to_mb(state.total)} MB"
+            )
+
+    report_task = asyncio.create_task(reporter())
+    try:
+        with file_path.open("rb") as raw:
+            wrapped = ProgressFile(raw, state)
+            data = aiohttp.FormData()
+            data.add_field("chat_id", str(job.chat_id))
+            data.add_field("caption", f"Uploaded: {file_path.name}")
+            data.add_field(
+                "document",
+                wrapped,
+                filename=file_path.name,
+                content_type="application/octet-stream",
+            )
+            await api.send_document(data)
+    finally:
+        state.done.set()
+        await asyncio.sleep(0)
+        report_task.cancel()
 
 
-async def copy_message_via_bot_api(
-    chat_id: int, from_chat_id: int, message_id: int
-) -> None:
-    def _do_request() -> None:
-        url = f"{BOT_API_URL.rstrip('/')}/bot{BOT_TOKEN}/copyMessage"
-        payload = urllib.parse.urlencode(
-            {
-                "chat_id": str(chat_id),
-                "from_chat_id": str(from_chat_id),
-                "message_id": str(message_id),
-            }
-        ).encode()
-        req = urllib.request.Request(url, data=payload)
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = resp.read().decode()
-        data = json.loads(body)
-        if not data.get("ok"):
-            raise RuntimeError(data.get("description", "copyMessage failed"))
-
-    await asyncio.to_thread(_do_request)
-
-
-async def process_job(
-    bot_client: TelegramClient, user_client: TelegramClient, job: Job
-) -> None:
-    editor = ThrottledEditor(bot_client, job.chat_id, job.status_message_id)
+async def process_job(api: BotAPI, job: Job) -> None:
+    editor = ThrottledEditor(api, job.chat_id, job.status_message_id)
     job_dir = DOWNLOAD_DIR / uuid.uuid4().hex
     job_dir.mkdir(parents=True, exist_ok=True)
     output_path = job_dir / "download.tmp"
@@ -243,9 +261,6 @@ async def process_job(
     try:
         async with global_semaphore:
             async with per_user_semaphore[job.user_id]:
-                if not bot_upload_target:
-                    await editor.update("Bot relay is not configured.", force=True)
-                    return
                 header_name, content_type = await probe_response_meta(job.url)
                 rc = await download_with_progress(job.url, output_path, editor)
                 if rc != 0:
@@ -267,15 +282,7 @@ async def process_job(
                     target_path = job_dir / f"{stem}-{uuid.uuid4().hex}{suffix}"
                 output_path.rename(target_path)
                 await editor.update("Uploading...", force=True)
-                upload_message = await upload_with_progress(
-                    user_client, bot_upload_target, target_path, editor
-                )
-                upload_message_id = (
-                    upload_message[0].id
-                    if isinstance(upload_message, list)
-                    else upload_message.id
-                )
-                await relay_via_bot(bot_client, job, upload_message_id)
+                await upload_with_progress(api, job, target_path, editor)
                 await editor.update("Done.", force=True)
     except Exception as exc:
         await editor.update(f"Error: {exc}", force=True)
@@ -288,11 +295,11 @@ async def process_job(
         pending_by_user[job.user_id] = max(0, pending_by_user[job.user_id] - 1)
 
 
-async def worker(bot_client: TelegramClient, user_client: TelegramClient) -> None:
+async def worker(api: BotAPI) -> None:
     while True:
         job = await queue.get()
         try:
-            await process_job(bot_client, user_client, job)
+            await process_job(api, job)
         finally:
             queue.task_done()
 
@@ -304,58 +311,77 @@ def extract_url(text: str) -> str | None:
     return match.group(1)
 
 
+async def handle_message(api: BotAPI, message: dict) -> None:
+    if "text" not in message:
+        return
+    text = (message.get("text") or "").strip()
+    lowered = text.lower()
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    sender = message.get("from") or {}
+    user_id = sender.get("id")
+    if chat_id is None or user_id is None:
+        return
+    if lowered in {"ping", "/ping"}:
+        await api.send_message(chat_id, "Pong!", reply_to_message_id=message.get("message_id"))
+        return
+    url = extract_url(text)
+    if not url:
+        return
+    if pending_by_user[user_id] >= MAX_PENDING_PER_USER:
+        await api.send_message(
+            chat_id,
+            "You already have 3 pending downloads. Please wait.",
+            reply_to_message_id=message.get("message_id"),
+        )
+        return
+    if queue.full():
+        await api.send_message(
+            chat_id,
+            f"Queue is full ({MAX_QUEUE_SIZE}). Please try later.",
+            reply_to_message_id=message.get("message_id"),
+        )
+        return
+    pending_by_user[user_id] += 1
+    position = queue.qsize() + 1
+    status_message = await api.send_message(
+        chat_id,
+        f"Queued (position {position}).",
+        reply_to_message_id=message.get("message_id"),
+    )
+    job = Job(
+        user_id=user_id,
+        chat_id=chat_id,
+        url=url,
+        status_message_id=status_message["message_id"],
+    )
+    await queue.put(job)
+
+
+async def poll_updates(api: BotAPI) -> None:
+    offset = 0
+    while True:
+        updates = await api.get_updates(offset=offset, timeout=60)
+        for update in updates:
+            offset = max(offset, update.get("update_id", 0) + 1)
+            message = update.get("message")
+            if message:
+                await handle_message(api, message)
+
+
 async def main() -> None:
     if shutil.which("wget") is None:
         raise RuntimeError("wget not found in PATH.")
 
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-    bot_client = TelegramClient("bot", API_ID, API_HASH)
-    await bot_client.start(bot_token=BOT_TOKEN)
-    user_client = TelegramClient(SESSION, API_ID, API_HASH)
-    await user_client.start(phone=USER_PHONE, password=USER_PASSWORD)
-    bot_me = await bot_client.get_me()
-    user_me = await user_client.get_me()
-    bot_username = BOT_USERNAME or bot_me.username
-    if not bot_username:
-        raise RuntimeError("Bot username is required for relay.")
-    global bot_upload_target, user_self_id
-    bot_upload_target = bot_username
-    user_self_id = user_me.id
-
-    for _ in range(MAX_CONCURRENT_DOWNLOADS):
-        asyncio.create_task(worker(bot_client, user_client))
-
-    @bot_client.on(events.NewMessage(incoming=True))
-    async def handler(event: events.NewMessage.Event) -> None:
-        text = (event.raw_text or "").strip()
-        lowered = text.lower()
-        if lowered in {"ping", "/ping"}:
-            await event.reply("Pong!")
-            return
-        url = extract_url(text)
-        if not url:
-            return
-        user_id = event.sender_id
-        if pending_by_user[user_id] >= MAX_PENDING_PER_USER:
-            await event.reply("You already have 3 pending downloads. Please wait.")
-            return
-        if queue.full():
-            await event.reply(f"Queue is full ({MAX_QUEUE_SIZE}). Please try later.")
-            return
-        pending_by_user[user_id] += 1
-        position = queue.qsize() + 1
-        status_message = await event.reply(f"Queued (position {position}).")
-        job = Job(
-            user_id=user_id,
-            chat_id=event.chat_id,
-            url=url,
-            status_message_id=status_message.id,
-        )
-        await queue.put(job)
-
-    print("Bot is running. User client ready for uploads.")
-    await bot_client.run_until_disconnected()
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=300)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        api = BotAPI(BOT_API_URL, BOT_TOKEN, session)
+        for _ in range(MAX_CONCURRENT_DOWNLOADS):
+            asyncio.create_task(worker(api))
+        print("Bot is running (local Bot API).")
+        await poll_updates(api)
 
 
 if __name__ == "__main__":
