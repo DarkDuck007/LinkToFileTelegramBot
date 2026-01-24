@@ -232,6 +232,23 @@ async def copy_message_via_bot_api(
     await asyncio.to_thread(_do_request)
 
 
+async def find_bot_message_id(
+    bot_client: TelegramClient, filename: str, timeout_seconds: int = 30
+) -> int | None:
+    if user_self_id is None:
+        return None
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        messages = await bot_client.get_messages(user_self_id, limit=10)
+        for message in messages:
+            if message and message.file and message.file.name == filename:
+                return message.id
+            if message and message.media and message.text and filename in message.text:
+                return message.id
+        await asyncio.sleep(1)
+    return None
+
+
 async def process_job(
     bot_client: TelegramClient, user_client: TelegramClient, job: Job
 ) -> None:
@@ -275,7 +292,16 @@ async def process_job(
                     if isinstance(upload_message, list)
                     else upload_message.id
                 )
-                await relay_via_bot(bot_client, job, upload_message_id)
+                bot_message_id = await find_bot_message_id(
+                    bot_client, target_path.name
+                )
+                if bot_message_id is None:
+                    await editor.update(
+                        "Upload received, but bot could not see the file.",
+                        force=True,
+                    )
+                    return
+                await relay_via_bot(bot_client, job, bot_message_id)
                 await editor.update("Done.", force=True)
     except Exception as exc:
         await editor.update(f"Error: {exc}", force=True)
