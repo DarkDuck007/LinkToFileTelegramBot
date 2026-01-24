@@ -119,8 +119,8 @@ async def probe_response_meta(url: str) -> tuple[str | None, str | None, int | N
         "--server-response",
         "--spider",
         "--max-redirect=20",
-        "--connect-timeout=30",
-        "--read-timeout=30",
+        "--connect-timeout=10",
+        "--read-timeout=10",
         url,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
@@ -256,12 +256,15 @@ async def relay_via_bot(
     bot_client: TelegramClient,
     job: Job,
     upload_message_id: int,
+    caption: str,
 ) -> None:
     if user_self_id is None:
         raise RuntimeError("Bot relay is not configured.")
     for _ in range(10):
         try:
-            await copy_message_via_bot_api(job.chat_id, user_self_id, upload_message_id)
+            await copy_message_via_bot_api(
+                job.chat_id, user_self_id, upload_message_id, caption
+            )
             return
         except Exception:
             await asyncio.sleep(1)
@@ -269,7 +272,7 @@ async def relay_via_bot(
 
 
 async def copy_message_via_bot_api(
-    chat_id: int, from_chat_id: int, message_id: int
+    chat_id: int, from_chat_id: int, message_id: int, caption: str
 ) -> None:
     def _do_request() -> None:
         url = f"{BOT_API_URL.rstrip('/')}/bot{BOT_TOKEN}/copyMessage"
@@ -278,6 +281,8 @@ async def copy_message_via_bot_api(
                 "chat_id": str(chat_id),
                 "from_chat_id": str(from_chat_id),
                 "message_id": str(message_id),
+                "caption": caption,
+                "parse_mode": "MarkdownV2",
             }
         ).encode()
         req = urllib.request.Request(url, data=payload)
@@ -288,6 +293,10 @@ async def copy_message_via_bot_api(
             raise RuntimeError(data.get("description", "copyMessage failed"))
 
     await asyncio.to_thread(_do_request)
+
+
+def escape_markdown_v2(text: str) -> str:
+    return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", text)
 
 
 async def get_updates_via_bot_api(timeout_seconds: int = 5) -> list[dict]:
@@ -422,9 +431,10 @@ async def process_job(
                     await editor.update("Download failed.", force=True)
                     return
                 cached_message_id = await db_get_message_id(file_hash)
+                caption = f"File: `{escape_markdown_v2(target_path.name)}`"
                 if cached_message_id is not None:
                     try:
-                        await relay_via_bot(bot_client, job, cached_message_id)
+                        await relay_via_bot(bot_client, job, cached_message_id, caption)
                         await editor.update("Done.", force=True)
                         return
                     except Exception as exc:
@@ -452,7 +462,7 @@ async def process_job(
                     await editor.update("Download failed.", force=True)
                     return
                 await db_set_message_id(file_hash, bot_message_id)
-                await relay_via_bot(bot_client, job, bot_message_id)
+                await relay_via_bot(bot_client, job, bot_message_id, caption)
                 await editor.update("Done.", force=True)
     except Exception as exc:
         logger.exception("Job failed: %s", exc)
