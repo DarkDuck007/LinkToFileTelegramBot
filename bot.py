@@ -76,6 +76,7 @@ class ThrottledEditor:
 
 queue: asyncio.Queue[Job] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
 pending_by_user: dict[int, int] = defaultdict(int)
+pending_links_by_user: dict[int, set[str]] = defaultdict(set)
 per_user_semaphore: dict[int, asyncio.Semaphore] = defaultdict(
     lambda: asyncio.Semaphore(MAX_PENDING_PER_USER)
 )
@@ -473,6 +474,7 @@ async def process_job(
             except OSError:
                 pass
         pending_by_user[job.user_id] = max(0, pending_by_user[job.user_id] - 1)
+        pending_links_by_user[job.user_id].discard(job.url)
 
 
 async def worker(bot_client: TelegramClient, user_client: TelegramClient) -> None:
@@ -536,6 +538,9 @@ async def main() -> None:
             await event.reply("Send me a link :3")
             return
         user_id = event.sender_id
+        if url in pending_links_by_user[user_id]:
+            await event.reply("I'm still trying to upload this one :( please wait.")
+            return
         if pending_by_user[user_id] >= MAX_PENDING_PER_USER:
             await event.reply("You already have 3 pending downloads. Please wait.")
             return
@@ -543,6 +548,7 @@ async def main() -> None:
             await event.reply(f"Queue is full ({MAX_QUEUE_SIZE}). Please try later.")
             return
         pending_by_user[user_id] += 1
+        pending_links_by_user[user_id].add(url)
         position = queue.qsize() + 1
         status_message = await event.reply(f"Queued (position {position}).")
         job = Job(
