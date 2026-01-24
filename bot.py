@@ -1,10 +1,12 @@
 import asyncio
+import json
 import os
 import re
-import random
 import shutil
 import time
 import uuid
+import urllib.parse
+import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +14,6 @@ from urllib.parse import unquote, urlparse
 
 from telethon import TelegramClient, events
 from telethon.errors import RPCError
-from telethon.tl.functions.messages import CopyMessagesRequest
 
 
 API_ID = int(os.environ["TELETHON_API_ID"])
@@ -20,6 +21,7 @@ API_HASH = os.environ["TELETHON_API_HASH"]
 SESSION = os.environ.get("TELETHON_SESSION", "userbot")
 BOT_TOKEN = os.environ["TELETHON_BOT_TOKEN"]
 BOT_USERNAME = os.environ.get("TELETHON_BOT_USERNAME")
+BOT_API_URL = os.environ.get("BOT_API_URL", "https://api.telegram.org")
 USER_PHONE = os.environ["TELETHON_PHONE"]
 USER_PASSWORD = os.environ.get("TELETHON_PASSWORD")
 DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", "downloads"))
@@ -199,22 +201,35 @@ async def relay_via_bot(
 ) -> None:
     if user_self_id is None:
         raise RuntimeError("Bot relay is not configured.")
-    user_entity = await bot_client.get_input_entity(user_self_id)
-    target_entity = await bot_client.get_input_entity(job.chat_id)
     for _ in range(10):
         try:
-            await bot_client(
-                CopyMessagesRequest(
-                    from_peer=user_entity,
-                    id=[upload_message_id],
-                    to_peer=target_entity,
-                    random_id=[random.getrandbits(64)],
-                )
-            )
+            await copy_message_via_bot_api(job.chat_id, user_self_id, upload_message_id)
             return
-        except RPCError:
+        except Exception:
             await asyncio.sleep(1)
     raise RuntimeError("Bot relay failed to access uploaded media.")
+
+
+async def copy_message_via_bot_api(
+    chat_id: int, from_chat_id: int, message_id: int
+) -> None:
+    def _do_request() -> None:
+        url = f"{BOT_API_URL.rstrip('/')}/bot{BOT_TOKEN}/copyMessage"
+        payload = urllib.parse.urlencode(
+            {
+                "chat_id": str(chat_id),
+                "from_chat_id": str(from_chat_id),
+                "message_id": str(message_id),
+            }
+        ).encode()
+        req = urllib.request.Request(url, data=payload)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode()
+        data = json.loads(body)
+        if not data.get("ok"):
+            raise RuntimeError(data.get("description", "copyMessage failed"))
+
+    await asyncio.to_thread(_do_request)
 
 
 async def process_job(
