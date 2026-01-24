@@ -210,6 +210,7 @@ async def upload_with_progress(
     target: object,
     file_path: Path,
     editor: ThrottledEditor,
+    caption: str,
 ) -> object:
     last_update = 0.0
 
@@ -226,7 +227,7 @@ async def upload_with_progress(
     return await user_client.send_file(
         target,
         file_path,
-        caption=f"Uploaded: {file_path.name}",
+        caption=caption,
         progress_callback=progress_callback,
     )
 
@@ -322,7 +323,9 @@ async def db_delete_hash(file_hash: str) -> None:
         db_conn.commit()
 
 
-async def find_bot_message_id(filename: str, timeout_seconds: int = 30) -> int | None:
+async def find_bot_message_id(
+    filename: str, file_hash: str, timeout_seconds: int = 30
+) -> int | None:
     if user_self_id is None:
         return None
     deadline = time.monotonic() + timeout_seconds
@@ -335,6 +338,9 @@ async def find_bot_message_id(filename: str, timeout_seconds: int = 30) -> int |
                 continue
             document = message.get("document") or {}
             if document.get("file_name") == filename:
+                return message.get("message_id")
+            caption = message.get("caption") or ""
+            if file_hash in caption or filename in caption:
                 return message.get("message_id")
         await asyncio.sleep(1)
     return None
@@ -391,15 +397,18 @@ async def process_job(
                         logger.exception("Cached relay failed: %s", exc)
                         await db_delete_hash(file_hash)
                 await editor.update("Uploading...", force=True)
+                caption = f"Uploaded: {target_path.name}\nHash: {file_hash}"
                 upload_message = await upload_with_progress(
-                    user_client, bot_upload_target, target_path, editor
+                    user_client, bot_upload_target, target_path, editor, caption
                 )
                 upload_message_id = (
                     upload_message[0].id
                     if isinstance(upload_message, list)
                     else upload_message.id
                 )
-                bot_message_id = await find_bot_message_id(target_path.name)
+                bot_message_id = await find_bot_message_id(
+                    target_path.name, file_hash
+                )
                 if bot_message_id is None:
                     logger.error(
                         "Bot could not see uploaded media filename=%s",
