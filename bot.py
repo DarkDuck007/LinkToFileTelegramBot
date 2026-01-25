@@ -34,7 +34,7 @@ DB_PATH = Path(os.environ.get("HASH_DB_PATH", "hash_cache.db"))
 BALE_BOT_TOKEN = os.environ.get("BALE_BOT_TOKEN")
 BALE_API_URL = os.environ.get("BALE_API_URL", "https://tapi.bale.ai")
 BALE_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
-BALE_ZIP_PART_BYTES = 30 * 1024 * 1024
+BALE_ZIP_PART_BYTES = 40 * 1024 * 1024
 
 MAX_CONCURRENT_DOWNLOADS = 10
 MAX_PENDING_PER_USER = 3
@@ -1190,7 +1190,7 @@ async def poll_bale_updates(
                 if text.lower() in {"ping", "/ping"}:
                     await api.send_message(chat_id, "Pong!")
                     continue
-                await api.send_message(chat_id, "Send me a link :3")
+                await api.send_message(chat_id, "send me a link, a (key:keystring) message, or a file with a caption like (key:yourkey) :3")
                 continue
 
 
@@ -1283,7 +1283,7 @@ async def main() -> None:
             return
         url = extract_url(text)
         if not url:
-            await event.reply("Send me a link :3")
+            await event.reply("send me a link, a (key:keystring) message, or a file with a caption like (key:yourkey) :3")
             return
         user_id = event.sender_id
         if url in pending_links_by_user[user_id]:
