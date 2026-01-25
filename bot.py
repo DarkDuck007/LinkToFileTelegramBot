@@ -45,7 +45,6 @@ SIZE_LIMIT_EXCEEDED = 3
 
 URL_RE = re.compile(r"(https?://\S+)")
 KEY_RE = re.compile(r"(?i)\bkey:(.+)")
-KEY_COMMAND_RE = re.compile(r'(?i)^/key\\s+(?:"([^"]+)"|(\\S+))')
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1285,13 +1284,17 @@ def extract_key(text: str) -> str | None:
 
 
 def extract_key_command(text: str) -> str | None:
-    match = KEY_COMMAND_RE.match(text.strip())
-    if not match:
+    stripped = text.strip()
+    if not stripped.lower().startswith("/key"):
         return None
-    key = match.group(1) or match.group(2)
+    remainder = stripped[4:]
+    if remainder.startswith("@"):
+        parts = remainder.split(None, 1)
+        remainder = parts[1] if len(parts) > 1 else ""
+    key = remainder.lstrip()
     if not key:
         return None
-    return key.strip() or None
+    return key
 
 
 async def main() -> None:
