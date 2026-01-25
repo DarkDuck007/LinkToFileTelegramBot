@@ -61,7 +61,11 @@ class BaleApi:
     ) -> dict:
         url = f"{self._base_url}/bot{self._token}/{method}"
         resp = requests.post(url, data=data, files=files, timeout=timeout)
-        resp.raise_for_status()
+        if not resp.ok:
+            body = resp.text.strip()
+            raise RuntimeError(
+                f"{method} failed ({resp.status_code}): {body or 'no response body'}"
+            )
         payload = resp.json()
         if not payload.get("ok"):
             raise RuntimeError(payload.get("description", f"{method} failed"))
@@ -126,8 +130,11 @@ class BaleApi:
             data = {"chat_id": str(chat_id)}
             if caption:
                 data["caption"] = caption
+            safe_name = ascii_filename(filename or file_path.name)
             with file_path.open("rb") as handle:
-                files = {"document": (filename or file_path.name, handle)}
+                files = {
+                    "document": (safe_name, handle, "application/octet-stream")
+                }
                 return self._request_sync(
                     "sendDocument", data=data, files=files, timeout=120
                 )
@@ -172,6 +179,14 @@ def filename_from_url(url: str) -> str:
     basename = re.sub(r'[<>:"/\\\\|?*]', "_", basename)
     basename = basename.strip(" .")
     return basename
+
+
+def ascii_filename(name: str) -> str:
+    if not name:
+        return "file"
+    sanitized = "".join(ch if ord(ch) < 128 else "_" for ch in name)
+    sanitized = re.sub(r'[<>:"/\\\\|?*]', "_", sanitized).strip(" .")
+    return sanitized or "file"
 
 
 def filename_from_header(value: str) -> str | None:
@@ -261,7 +276,7 @@ async def download_with_progress(
         stderr=asyncio.subprocess.PIPE,
     )
     last_update = 0.0
-    percent_re = re.compile(r"(\\d+)%")
+    percent_re = re.compile(r"(\d+)%")
     stderr_tail: list[str] = []
     while True:
         line = await process.stderr.readline()
