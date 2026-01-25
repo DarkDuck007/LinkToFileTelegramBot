@@ -45,6 +45,7 @@ SIZE_LIMIT_EXCEEDED = 3
 
 URL_RE = re.compile(r"(https?://\S+)")
 KEY_RE = re.compile(r"(?i)\bkey:(.+)")
+KEY_COMMAND_RE = re.compile(r'(?i)^/key\\s+(?:"([^"]+)"|(\\S+))')
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1011,6 +1012,27 @@ async def handle_telegram_key_store(
     await event.reply("Key saved.")
 
 
+async def handle_telegram_key_reply_store(
+    event: events.NewMessage.Event, key: str
+) -> None:
+    reply = await event.get_reply_message()
+    if not reply or not reply.media:
+        await event.reply("Reply to a file to save a key.")
+        return
+    filename = reply.file.name if reply.file else None
+    success = await db_insert_key_entry(
+        key,
+        "telegram",
+        tg_chat_id=reply.chat_id,
+        tg_message_id=reply.id,
+        filename=filename,
+    )
+    if not success:
+        await event.reply("Key already exists.")
+        return
+    await event.reply("Key saved.")
+
+
 async def handle_telegram_key_request(
     bot_client: TelegramClient,
     user_client: TelegramClient,
@@ -1064,6 +1086,30 @@ async def handle_bale_key_store(api: BaleApi, chat_id: int, message: dict) -> No
         return
     filename = None
     document = message.get("document") or {}
+    if document:
+        filename = document.get("file_name")
+    success = await db_insert_key_entry(
+        key,
+        "bale",
+        bale_file_id=file_id,
+        filename=filename,
+    )
+    if not success:
+        await api.send_message(chat_id, "Key already exists.")
+        return
+    await api.send_message(chat_id, "Key saved.")
+
+
+async def handle_bale_key_reply_store(
+    api: BaleApi, chat_id: int, message: dict, key: str
+) -> None:
+    reply = message.get("reply_to_message") or {}
+    file_id = extract_bale_file_id(reply)
+    if not file_id:
+        await api.send_message(chat_id, "Reply to a file to save a key.")
+        return
+    filename = None
+    document = reply.get("document") or {}
     if document:
         filename = document.get("file_name")
     success = await db_insert_key_entry(
@@ -1173,6 +1219,12 @@ async def poll_bale_updates(
                     await handle_bale_key_store(api, chat_id, message)
                     continue
                 if text:
+                    key_command = extract_key_command(text)
+                    if key_command:
+                        await handle_bale_key_reply_store(
+                            api, chat_id, message, key_command
+                        )
+                        continue
                     key = extract_key(text)
                     if key:
                         await handle_bale_key_request(api, bot_client, chat_id, key)
@@ -1230,6 +1282,16 @@ def extract_key(text: str) -> str | None:
         return None
     key = match.group(1).strip()
     return key or None
+
+
+def extract_key_command(text: str) -> str | None:
+    match = KEY_COMMAND_RE.match(text.strip())
+    if not match:
+        return None
+    key = match.group(1) or match.group(2)
+    if not key:
+        return None
+    return key.strip() or None
 
 
 async def main() -> None:
@@ -1293,6 +1355,10 @@ async def main() -> None:
         if user_self_id is not None and event.sender_id == user_self_id:
             return
         text = (event.raw_text or "").strip()
+        key_command = extract_key_command(text)
+        if key_command:
+            await handle_telegram_key_reply_store(event, key_command)
+            return
         key = extract_key(text)
         if event.message and event.message.media and key:
             await handle_telegram_key_store(event, key)
