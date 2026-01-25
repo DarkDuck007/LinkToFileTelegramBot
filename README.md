@@ -27,6 +27,24 @@ Run:
 python bot.py
 ```
 
+## Bale bot
+
+This variant uses the Bale Bot API with `requests` and stores persistent `file_id`
+values to avoid reuploading the same file hash.
+
+Set environment variables:
+
+- `BALE_BOT_TOKEN`
+- `BALE_API_URL` (optional, default: `https://tapi.bale.ai`)
+- `BALE_DOWNLOAD_DIR` (optional, default: `bale_downloads`)
+- `BALE_HASH_DB_PATH` (optional, default: `bale_hash_cache.db`)
+
+Run:
+
+```bash
+python bale_bot.py
+```
+
 ## Notes
 
 - Max 10 concurrent downloads, max 3 pending per user, queue size 100.
