@@ -442,8 +442,9 @@ async def process_job(api: BaleApi, job: Job) -> None:
                         if attempt == 2:
                             raise
                         if attempt == 0:
-                            stem = Path(upload_filename).stem or "file"
-                            upload_filename = f"{stem}.bin"
+                            upload_filename = uuid.uuid4().hex
+                        else:
+                            upload_filename = uuid.uuid4().hex
                         await asyncio.sleep(2 * (attempt + 1))
                 file_id = extract_file_id(message)
                 if file_id:
