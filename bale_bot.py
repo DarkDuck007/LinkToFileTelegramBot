@@ -57,7 +57,7 @@ class BaleApi:
         method: str,
         data: dict[str, str] | None = None,
         files: dict | None = None,
-        timeout: int = 30,
+        timeout: int | tuple[int, int] = 30,
     ) -> dict:
         url = f"{self._base_url}/bot{self._token}/{method}"
         resp = requests.post(url, data=data, files=files, timeout=timeout)
@@ -76,7 +76,7 @@ class BaleApi:
         method: str,
         data: dict[str, str] | None = None,
         files: dict | None = None,
-        timeout: int = 30,
+        timeout: int | tuple[int, int] = 30,
     ) -> dict:
         return await asyncio.to_thread(
             self._request_sync, method, data, files, timeout
@@ -136,7 +136,7 @@ class BaleApi:
                     "document": (safe_name, handle, "application/octet-stream")
                 }
                 return self._request_sync(
-                    "sendDocument", data=data, files=files, timeout=120
+                    "sendDocument", data=data, files=files, timeout=(10, 300)
                 )
 
         return await asyncio.to_thread(_upload)
@@ -422,20 +422,28 @@ async def process_job(api: BaleApi, job: Job) -> None:
                         await db_delete_hash(file_hash)
                 await editor.update("Uploading...", force=True)
                 message = None
+                upload_filename = target_path.name
                 for attempt in range(3):
                     try:
                         message = await api.send_document(
                             job.chat_id,
                             upload_caption,
                             file_path=target_path,
-                            filename=target_path.name,
+                            filename=upload_filename,
                         )
                         break
                     except RuntimeError as exc:
-                        if "failed to upload file bytes" not in str(exc).lower():
+                        error_text = str(exc).lower()
+                        if (
+                            "failed to upload file bytes" not in error_text
+                            and "504" not in error_text
+                        ):
                             raise
                         if attempt == 2:
                             raise
+                        if attempt == 0:
+                            stem = Path(upload_filename).stem or "file"
+                            upload_filename = f"{stem}.bin"
                         await asyncio.sleep(2 * (attempt + 1))
                 file_id = extract_file_id(message)
                 if file_id:
