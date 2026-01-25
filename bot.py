@@ -45,7 +45,7 @@ SIZE_LIMIT_EXCEEDED = 3
 
 URL_RE = re.compile(r"(https?://\S+)")
 KEY_RE = re.compile(r"(?i)\bkey:(.+)")
-HASH_RE = re.compile(r"(?i)\bhash:(.+)")
+HASH_RE = re.compile(r"(?i)\bhash:\s*(.+)")
 
 logging.basicConfig(
     level=logging.INFO,
