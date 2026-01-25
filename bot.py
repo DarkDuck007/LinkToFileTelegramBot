@@ -1017,34 +1017,37 @@ async def handle_telegram_key_request(
     event: events.NewMessage.Event,
     key: str,
 ) -> None:
+    status = await event.reply("Fetching file for this key...")
     entry = await db_get_key_entry(key)
     if not entry:
-        await event.reply("Key not found.")
+        await status.edit("Key not found.")
         return
     if entry.get("source") == "telegram":
         tg_chat_id = entry.get("tg_chat_id")
         tg_message_id = entry.get("tg_message_id")
         if tg_chat_id is None or tg_message_id is None:
-            await event.reply("Key is missing Telegram metadata.")
+            await status.edit("Key is missing Telegram metadata.")
             return
         await relay_telegram_cached(event.chat_id, tg_chat_id, tg_message_id, None)
+        await status.edit("Done.")
         return
     if bale_api is None:
-        await event.reply("Bale bot is not configured.")
+        await status.edit("Bale bot is not configured.")
         return
     bale_ids = parse_bale_file_ids(entry.get("bale_file_id"))
     if not bale_ids:
-        await event.reply("Key is missing Bale metadata.")
+        await status.edit("Key is missing Bale metadata.")
         return
     temp_dir = make_temp_dir("bale-to-telegram")
     try:
         file_path = await download_bale_media(bale_api, bale_ids[0], temp_dir)
         if not file_path:
-            await event.reply("Download failed.")
+            await status.edit("Download failed.")
             return
         file_hash = compute_sha256(file_path)
         await db_update_key_entry(key, file_hash=file_hash)
         await upload_path_to_telegram(bot_client, user_client, event.chat_id, file_path, None)
+        await status.edit("Done.")
     finally:
         if temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1081,22 +1084,28 @@ async def handle_bale_key_request(
     chat_id: int,
     key: str,
 ) -> None:
+    status = await api.send_message(chat_id, "Fetching file for this key...")
     entry = await db_get_key_entry(key)
     if not entry:
-        await api.send_message(chat_id, "Key not found.")
+        await api.edit_message_text(chat_id, status.get("message_id"), "Key not found.")
         return
     if entry.get("source") == "bale":
         bale_ids = parse_bale_file_ids(entry.get("bale_file_id"))
         if not bale_ids:
-            await api.send_message(chat_id, "Key is missing Bale metadata.")
+            await api.edit_message_text(
+                chat_id, status.get("message_id"), "Key is missing Bale metadata."
+            )
             return
         for file_id in bale_ids:
             await api.send_document(chat_id, None, file_id=file_id)
+        await api.edit_message_text(chat_id, status.get("message_id"), "Done.")
         return
     tg_chat_id = entry.get("tg_chat_id")
     tg_message_id = entry.get("tg_message_id")
     if tg_chat_id is None or tg_message_id is None:
-        await api.send_message(chat_id, "Key is missing Telegram metadata.")
+        await api.edit_message_text(
+            chat_id, status.get("message_id"), "Key is missing Telegram metadata."
+        )
         return
     temp_dir = make_temp_dir("telegram-to-bale")
     try:
@@ -1104,7 +1113,9 @@ async def handle_bale_key_request(
             bot_client, tg_chat_id, tg_message_id, temp_dir
         )
         if not file_path:
-            await api.send_message(chat_id, "Download failed.")
+            await api.edit_message_text(
+                chat_id, status.get("message_id"), "Download failed."
+            )
             return
         original_hash = compute_sha256(file_path)
         file_ids = await upload_path_to_bale(api, chat_id, file_path, original_hash)
@@ -1113,6 +1124,7 @@ async def handle_bale_key_request(
             await db_update_key_entry(
                 key, bale_file_id=bale_value, file_hash=original_hash
             )
+        await api.edit_message_text(chat_id, status.get("message_id"), "Done.")
     finally:
         if temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
