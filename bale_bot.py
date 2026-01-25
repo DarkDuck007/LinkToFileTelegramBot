@@ -399,7 +399,17 @@ async def process_job(api: BaleApi, job: Job) -> None:
                     await editor.update("Download failed.", force=True)
                     return
                 cached_file_id = await db_get_file_id(file_hash)
-                upload_caption = f"Uploaded: {target_path.name}\\nHash: {file_hash}"
+                file_size = target_path.stat().st_size
+                if file_size > MAX_UPLOAD_BYTES:
+                    await editor.update(
+                        "I cannot upload files bigger than 50MB :(",
+                        force=True,
+                    )
+                    return
+                if file_size == 0:
+                    await editor.update("Download failed.", force=True)
+                    return
+                upload_caption = f"Uploaded: {target_path.name}\nHash: {file_hash}"
                 if cached_file_id:
                     try:
                         await api.send_document(
@@ -411,12 +421,22 @@ async def process_job(api: BaleApi, job: Job) -> None:
                         logger.exception("Cached send failed: %s", exc)
                         await db_delete_hash(file_hash)
                 await editor.update("Uploading...", force=True)
-                message = await api.send_document(
-                    job.chat_id,
-                    upload_caption,
-                    file_path=target_path,
-                    filename=target_path.name,
-                )
+                message = None
+                for attempt in range(3):
+                    try:
+                        message = await api.send_document(
+                            job.chat_id,
+                            upload_caption,
+                            file_path=target_path,
+                            filename=target_path.name,
+                        )
+                        break
+                    except RuntimeError as exc:
+                        if "failed to upload file bytes" not in str(exc).lower():
+                            raise
+                        if attempt == 2:
+                            raise
+                        await asyncio.sleep(2 * (attempt + 1))
                 file_id = extract_file_id(message)
                 if file_id:
                     await db_set_file_id(file_hash, file_id)
