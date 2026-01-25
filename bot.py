@@ -393,6 +393,12 @@ def compute_sha256(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def make_hash_caption(filename: str | None, file_hash: str) -> str:
+    if filename:
+        return f"Uploaded: {filename}\nHash: {file_hash}"
+    return f"Hash: {file_hash}"
+
+
 def make_temp_dir(prefix: str) -> Path:
     path = DOWNLOAD_DIR / f"{prefix}-{uuid.uuid4().hex}"
     path.mkdir(parents=True, exist_ok=True)
@@ -768,6 +774,8 @@ async def upload_path_to_telegram(
         raise RuntimeError("Bot relay is not configured.")
     file_hash = compute_sha256(file_path)
     cached_message_id = await db_get_message_id(file_hash)
+    if caption is None:
+        caption = make_hash_caption(file_path.name, file_hash)
     if cached_message_id is not None:
         await relay_telegram_cached(chat_id, user_self_id, cached_message_id, caption)
         return
@@ -904,10 +912,12 @@ async def process_job(
                     await editor.update("Download failed.", force=True)
                     return
                 cached_message_id = await db_get_message_id(file_hash)
-                upload_caption = f"Uploaded: {target_path.name}\nHash: {file_hash}"
+                upload_caption = make_hash_caption(target_path.name, file_hash)
                 if cached_message_id is not None:
                     try:
-                        await relay_via_bot(bot_client, job, cached_message_id, "")
+                        await relay_via_bot(
+                            bot_client, job, cached_message_id, upload_caption
+                        )
                         await editor.update("Done <3", force=True)
                         return
                     except Exception as exc:
@@ -934,7 +944,7 @@ async def process_job(
                     await editor.update("Download failed.", force=True)
                     return
                 await db_set_message_id(file_hash, bot_message_id)
-                await relay_via_bot(bot_client, job, bot_message_id, "")
+                await relay_via_bot(bot_client, job, bot_message_id, upload_caption)
                 await editor.update("Done <3", force=True)
     except Exception as exc:
         logger.exception("Job failed: %s", exc)
@@ -1073,7 +1083,13 @@ async def handle_telegram_key_request(
         if tg_chat_id is None or tg_message_id is None:
             await status.edit("Key is missing Telegram metadata.")
             return
-        await relay_telegram_cached(event.chat_id, tg_chat_id, tg_message_id, None)
+        file_hash = entry.get("file_hash")
+        caption = (
+            make_hash_caption(entry.get("filename"), file_hash)
+            if file_hash
+            else None
+        )
+        await relay_telegram_cached(event.chat_id, tg_chat_id, tg_message_id, caption)
         await status.edit("Done <3")
         return
     if bale_api is None:
@@ -1107,7 +1123,12 @@ async def handle_telegram_hash_request(
     status = await event.reply("Fetching file for this hash...")
     cached_message_id = await db_get_message_id(file_hash)
     if cached_message_id is not None and user_self_id is not None:
-        await relay_telegram_cached(event.chat_id, user_self_id, cached_message_id, None)
+        await relay_telegram_cached(
+            event.chat_id,
+            user_self_id,
+            cached_message_id,
+            make_hash_caption(None, file_hash),
+        )
         await status.edit("Done.")
         return
     if bale_api is not None:
@@ -1133,7 +1154,10 @@ async def handle_telegram_hash_request(
         tg_message_id = entry.get("tg_message_id")
         if tg_chat_id and tg_message_id and user_self_id is not None:
             await relay_telegram_cached(
-                event.chat_id, tg_chat_id, tg_message_id, None
+                event.chat_id,
+                tg_chat_id,
+                tg_message_id,
+                make_hash_caption(None, file_hash),
             )
             await status.edit("Done.")
             return
@@ -1423,7 +1447,7 @@ async def poll_bale_updates(
                         continue
                     await api.send_message(
                         chat_id,
-                        "send me a link, a (key:keystring) message, or a file with a caption like (key:yourkey) :3",
+                        "send me a link, a (key:keystring) message, or a file with a caption like (key:yourkey) or forward any file and reply to it with /key <your key> :3",
                     )
                     continue
             except Exception as exc:
@@ -1554,7 +1578,7 @@ async def main() -> None:
             return
         url = extract_url(text)
         if not url:
-            await event.reply("send me a link, a (key:keystring) message, or a file with a caption like (key:yourkey) :3")
+            await event.reply("send me a link, a (key:keystring) message, or a file with a caption like (key:yourkey) or forward any file and reply to it with /key <your key> :3")
             return
         user_id = event.sender_id
         if url in pending_links_by_user[user_id]:
