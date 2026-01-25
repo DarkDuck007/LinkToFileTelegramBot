@@ -45,6 +45,7 @@ SIZE_LIMIT_EXCEEDED = 3
 
 URL_RE = re.compile(r"(https?://\S+)")
 KEY_RE = re.compile(r"(?i)\bkey:(.+)")
+HASH_RE = re.compile(r"(?i)\bhash:(.+)")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -241,7 +242,7 @@ def ascii_filename(name: str) -> str:
 
 def should_zip(path: Path) -> bool:
     suffix = path.suffix.lower()
-    return suffix not in {".png", ".jpg", ".jpeg"}
+    return suffix not in {".png", ".jpg", ".jpeg", "mp3"}
 
 
 def create_zip(source_path: Path, zip_path: Path) -> None:
@@ -640,6 +641,29 @@ async def db_update_key_entry(
             tuple(values),
         )
         db_conn.commit()
+
+
+async def db_get_key_entry_by_hash(file_hash: str) -> dict | None:
+    if db_conn is None:
+        return None
+    async with db_lock:
+        cursor = db_conn.execute(
+            "SELECT key, source, tg_chat_id, tg_message_id, bale_file_id, filename, file_hash "
+            "FROM key_cache WHERE file_hash = ? LIMIT 1",
+            (file_hash,),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return None
+    return {
+        "key": row[0],
+        "source": row[1],
+        "tg_chat_id": row[2],
+        "tg_message_id": row[3],
+        "bale_file_id": row[4],
+        "filename": row[5],
+        "file_hash": row[6],
+    }
 
 
 async def find_bot_message_id(
@@ -1074,6 +1098,64 @@ async def handle_telegram_key_request(
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+async def handle_telegram_hash_request(
+    bot_client: TelegramClient,
+    user_client: TelegramClient,
+    event: events.NewMessage.Event,
+    file_hash: str,
+) -> None:
+    status = await event.reply("Fetching file for this hash...")
+    cached_message_id = await db_get_message_id(file_hash)
+    if cached_message_id is not None and user_self_id is not None:
+        await relay_telegram_cached(event.chat_id, user_self_id, cached_message_id, None)
+        await status.edit("Done.")
+        return
+    if bale_api is not None:
+        bale_file_id = await db_get_bale_file_id(file_hash)
+        if bale_file_id:
+            temp_dir = make_temp_dir("bale-to-telegram-hash")
+            try:
+                file_path = await download_bale_media(bale_api, bale_file_id, temp_dir)
+                if not file_path:
+                    await status.edit("Download failed.")
+                    return
+                await upload_path_to_telegram(
+                    bot_client, user_client, event.chat_id, file_path, None
+                )
+                await status.edit("Done.")
+                return
+            finally:
+                if temp_dir.exists():
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+    entry = await db_get_key_entry_by_hash(file_hash)
+    if entry:
+        tg_chat_id = entry.get("tg_chat_id")
+        tg_message_id = entry.get("tg_message_id")
+        if tg_chat_id and tg_message_id and user_self_id is not None:
+            await relay_telegram_cached(
+                event.chat_id, tg_chat_id, tg_message_id, None
+            )
+            await status.edit("Done.")
+            return
+        bale_ids = parse_bale_file_ids(entry.get("bale_file_id"))
+        if bale_api is not None and bale_ids:
+            temp_dir = make_temp_dir("bale-to-telegram-hash")
+            try:
+                file_path = await download_bale_media(bale_api, bale_ids[0], temp_dir)
+                if not file_path:
+                    await status.edit("Download failed.")
+                    return
+                await upload_path_to_telegram(
+                    bot_client, user_client, event.chat_id, file_path, None
+                )
+                await status.edit("Done.")
+                return
+            finally:
+                if temp_dir.exists():
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+    await status.edit("Hash not found.")
+
+
 async def handle_bale_key_store(api: BaleApi, chat_id: int, message: dict) -> None:
     caption = (message.get("caption") or "").strip()
     key = extract_key(caption)
@@ -1191,6 +1273,81 @@ async def handle_bale_key_request(
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+async def handle_bale_hash_request(
+    api: BaleApi,
+    bot_client: TelegramClient,
+    chat_id: int,
+    file_hash: str,
+) -> None:
+    status = await api.send_message(chat_id, "Fetching file for this hash...")
+    bale_file_id = await db_get_bale_file_id(file_hash)
+    if bale_file_id:
+        try:
+            await api.send_document(chat_id, None, file_id=bale_file_id)
+            await api.edit_message_text(chat_id, status.get("message_id"), "Done.")
+            return
+        except Exception as exc:
+            logger.exception("Bale cached hash send failed: %s", exc)
+            await db_delete_bale_hash(file_hash)
+    cached_message_id = await db_get_message_id(file_hash)
+    if cached_message_id is not None:
+        temp_dir = make_temp_dir("telegram-to-bale-hash")
+        try:
+            file_path = await download_telegram_media(
+                bot_client, user_self_id, cached_message_id, temp_dir
+            )
+            if not file_path:
+                await api.edit_message_text(
+                    chat_id, status.get("message_id"), "Download failed."
+                )
+                return
+            file_ids = await upload_path_to_bale(api, chat_id, file_path, file_hash)
+            if file_ids:
+                await db_set_bale_file_id(file_hash, file_ids[0])
+            await api.edit_message_text(chat_id, status.get("message_id"), "Done.")
+            return
+        finally:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+    entry = await db_get_key_entry_by_hash(file_hash)
+    if entry:
+        bale_ids = parse_bale_file_ids(entry.get("bale_file_id"))
+        if bale_ids:
+            try:
+                for file_id in bale_ids:
+                    await api.send_document(chat_id, None, file_id=file_id)
+                await api.edit_message_text(
+                    chat_id, status.get("message_id"), "Done."
+                )
+                return
+            except Exception as exc:
+                logger.exception("Bale hash send failed: %s", exc)
+        tg_chat_id = entry.get("tg_chat_id")
+        tg_message_id = entry.get("tg_message_id")
+        if tg_chat_id and tg_message_id:
+            temp_dir = make_temp_dir("telegram-to-bale-hash")
+            try:
+                file_path = await download_telegram_media(
+                    bot_client, tg_chat_id, tg_message_id, temp_dir
+                )
+                if not file_path:
+                    await api.edit_message_text(
+                        chat_id, status.get("message_id"), "Download failed."
+                    )
+                    return
+                file_ids = await upload_path_to_bale(api, chat_id, file_path, file_hash)
+                if file_ids:
+                    await db_set_bale_file_id(file_hash, file_ids[0])
+                await api.edit_message_text(
+                    chat_id, status.get("message_id"), "Done."
+                )
+                return
+            finally:
+                if temp_dir.exists():
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+    await api.edit_message_text(chat_id, status.get("message_id"), "Hash not found.")
+
+
 async def poll_bale_updates(
     api: BaleApi, bot_client: TelegramClient, user_client: TelegramClient
 ) -> None:
@@ -1222,6 +1379,12 @@ async def poll_bale_updates(
                     if key_command:
                         await handle_bale_key_reply_store(
                             api, chat_id, message, key_command
+                        )
+                        continue
+                    hash_query = extract_hash_query(text)
+                    if hash_query:
+                        await handle_bale_hash_request(
+                            api, bot_client, chat_id, hash_query
                         )
                         continue
                     key = extract_key(text)
@@ -1297,6 +1460,16 @@ def extract_key_command(text: str) -> str | None:
     return key
 
 
+def extract_hash_query(text: str) -> str | None:
+    match = HASH_RE.search(text)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    if not value:
+        return None
+    return value
+
+
 async def main() -> None:
     if shutil.which("wget") is None:
         raise RuntimeError("wget not found in PATH.")
@@ -1361,6 +1534,12 @@ async def main() -> None:
         key_command = extract_key_command(text)
         if key_command:
             await handle_telegram_key_reply_store(event, key_command)
+            return
+        hash_query = extract_hash_query(text)
+        if hash_query and not (event.message and event.message.media):
+            await handle_telegram_hash_request(
+                bot_client, user_client, event, hash_query
+            )
             return
         key = extract_key(text)
         if event.message and event.message.media and key:
