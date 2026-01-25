@@ -884,7 +884,7 @@ async def process_job(
                 if cached_message_id is not None:
                     try:
                         await relay_via_bot(bot_client, job, cached_message_id, "")
-                        await editor.update("Done.", force=True)
+                        await editor.update("Done <3", force=True)
                         return
                     except Exception as exc:
                         logger.exception("Cached relay failed: %s", exc)
@@ -911,7 +911,7 @@ async def process_job(
                     return
                 await db_set_message_id(file_hash, bot_message_id)
                 await relay_via_bot(bot_client, job, bot_message_id, "")
-                await editor.update("Done.", force=True)
+                await editor.update("Done <3", force=True)
     except Exception as exc:
         logger.exception("Job failed: %s", exc)
         await editor.update("Download failed.", force=True)
@@ -980,7 +980,7 @@ async def process_bale_link(
                 original_hash = compute_sha256(target_path)
                 await editor.update("Uploading...", force=True)
                 await upload_path_to_bale(api, chat_id, target_path, original_hash)
-                await editor.update("Done.", force=True)
+                await editor.update("Done <3", force=True)
     except Exception as exc:
         logger.exception("Bale link job failed: %s", exc)
         await editor.update("Download failed.", force=True)
@@ -1029,7 +1029,7 @@ async def handle_telegram_key_request(
             await status.edit("Key is missing Telegram metadata.")
             return
         await relay_telegram_cached(event.chat_id, tg_chat_id, tg_message_id, None)
-        await status.edit("Done.")
+        await status.edit("Done <3")
         return
     if bale_api is None:
         await status.edit("Bale bot is not configured.")
@@ -1047,7 +1047,7 @@ async def handle_telegram_key_request(
         file_hash = compute_sha256(file_path)
         await db_update_key_entry(key, file_hash=file_hash)
         await upload_path_to_telegram(bot_client, user_client, event.chat_id, file_path, None)
-        await status.edit("Done.")
+        await status.edit("Done <3")
     finally:
         if temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1094,7 +1094,7 @@ async def handle_bale_key_request(
         try:
             for file_id in cached_bale_ids:
                 await api.send_document(chat_id, None, file_id=file_id)
-            await api.edit_message_text(chat_id, status.get("message_id"), "Done.")
+            await api.edit_message_text(chat_id, status.get("message_id"), "Done <3")
             return
         except Exception as exc:
             logger.exception("Bale cached send failed: %s", exc)
@@ -1109,7 +1109,7 @@ async def handle_bale_key_request(
         try:
             for file_id in bale_ids:
                 await api.send_document(chat_id, None, file_id=file_id)
-            await api.edit_message_text(chat_id, status.get("message_id"), "Done.")
+            await api.edit_message_text(chat_id, status.get("message_id"), "Done <3")
         except Exception as exc:
             logger.exception("Bale send failed: %s", exc)
             await api.edit_message_text(
@@ -1140,7 +1140,7 @@ async def handle_bale_key_request(
             await db_update_key_entry(
                 key, bale_file_id=bale_value, file_hash=original_hash
             )
-        await api.edit_message_text(chat_id, status.get("message_id"), "Done.")
+        await api.edit_message_text(chat_id, status.get("message_id"), "Done <3")
     finally:
         if temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
