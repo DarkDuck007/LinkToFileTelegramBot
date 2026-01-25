@@ -27,6 +27,7 @@ MAX_PENDING_PER_USER = 3
 MAX_QUEUE_SIZE = 100
 PROGRESS_INTERVAL_SECONDS = 20
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+ZIP_PART_BYTES = 30 * 1024 * 1024
 SIZE_LIMIT_EXCEEDED = 3
 
 URL_RE = re.compile(r"(https?://\S+)")
@@ -314,6 +315,34 @@ def compute_sha256(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def should_zip(path: Path) -> bool:
+    suffix = path.suffix.lower()
+    return suffix not in {".png", ".jpg", ".jpeg"}
+
+
+def create_zip(source_path: Path, zip_path: Path) -> None:
+    import zipfile
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(source_path, arcname=source_path.name)
+
+
+def split_file(path: Path, part_size: int) -> list[Path]:
+    parts: list[Path] = []
+    index = 1
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(part_size)
+            if not chunk:
+                break
+            part_path = path.with_name(f"{path.stem}.part{index:02d}.zip")
+            with part_path.open("wb") as part_handle:
+                part_handle.write(chunk)
+            parts.append(part_path)
+            index += 1
+    return parts
+
+
 async def db_get_file_id(file_hash: str) -> str | None:
     if db_conn is None:
         return None
@@ -393,12 +422,11 @@ async def process_job(api: BaleApi, job: Job) -> None:
                     target_path = job_dir / f"{stem}-{uuid.uuid4().hex}{suffix}"
                 output_path.rename(target_path)
                 try:
-                    file_hash = compute_sha256(target_path)
+                    original_hash = compute_sha256(target_path)
                 except Exception as exc:
                     logger.exception("Hashing failed: %s", exc)
                     await editor.update("Download failed.", force=True)
                     return
-                cached_file_id = await db_get_file_id(file_hash)
                 file_size = target_path.stat().st_size
                 if file_size > MAX_UPLOAD_BYTES:
                     await editor.update(
@@ -409,46 +437,64 @@ async def process_job(api: BaleApi, job: Job) -> None:
                 if file_size == 0:
                     await editor.update("Download failed.", force=True)
                     return
-                upload_caption = f"Uploaded: {target_path.name}\nHash: {file_hash}"
-                if cached_file_id:
-                    try:
-                        await api.send_document(
-                            job.chat_id, upload_caption, file_id=cached_file_id
+
+                upload_items: list[tuple[Path, str]] = []
+                if should_zip(target_path):
+                    zip_path = target_path.with_suffix(".zip")
+                    create_zip(target_path, zip_path)
+                    zip_size = zip_path.stat().st_size
+                    if zip_size > ZIP_PART_BYTES:
+                        parts = split_file(zip_path, ZIP_PART_BYTES)
+                        upload_items.extend(
+                            (part, f"{zip_path.name} (part {idx}/{len(parts)})")
+                            for idx, part in enumerate(parts, start=1)
                         )
-                        await editor.update("Done.", force=True)
-                        return
-                    except Exception as exc:
-                        logger.exception("Cached send failed: %s", exc)
-                        await db_delete_hash(file_hash)
-                await editor.update("Uploading...", force=True)
-                message = None
-                upload_filename = target_path.name
-                for attempt in range(3):
-                    try:
-                        message = await api.send_document(
-                            job.chat_id,
-                            upload_caption,
-                            file_path=target_path,
-                            filename=upload_filename,
-                        )
-                        break
-                    except RuntimeError as exc:
-                        error_text = str(exc).lower()
-                        if (
-                            "failed to upload file bytes" not in error_text
-                            and "504" not in error_text
-                        ):
-                            raise
-                        if attempt == 2:
-                            raise
-                        if attempt == 0:
+                    else:
+                        upload_items.append((zip_path, zip_path.name))
+                else:
+                    upload_items.append((target_path, target_path.name))
+
+                for item_path, display_name in upload_items:
+                    item_hash = compute_sha256(item_path)
+                    upload_caption = (
+                        f"Uploaded: {display_name}\nHash: {original_hash}"
+                    )
+                    cached_file_id = await db_get_file_id(item_hash)
+                    if cached_file_id:
+                        try:
+                            await api.send_document(
+                                job.chat_id, upload_caption, file_id=cached_file_id
+                            )
+                            continue
+                        except Exception as exc:
+                            logger.exception("Cached send failed: %s", exc)
+                            await db_delete_hash(item_hash)
+                    await editor.update("Uploading...", force=True)
+                    message = None
+                    upload_filename = item_path.name
+                    for attempt in range(3):
+                        try:
+                            message = await api.send_document(
+                                job.chat_id,
+                                upload_caption,
+                                file_path=item_path,
+                                filename=upload_filename,
+                            )
+                            break
+                        except RuntimeError as exc:
+                            error_text = str(exc).lower()
+                            if (
+                                "failed to upload file bytes" not in error_text
+                                and "504" not in error_text
+                            ):
+                                raise
+                            if attempt == 2:
+                                raise
                             upload_filename = uuid.uuid4().hex
-                        else:
-                            upload_filename = uuid.uuid4().hex
-                        await asyncio.sleep(2 * (attempt + 1))
-                file_id = extract_file_id(message)
-                if file_id:
-                    await db_set_file_id(file_hash, file_id)
+                            await asyncio.sleep(2 * (attempt + 1))
+                    file_id = extract_file_id(message)
+                    if file_id:
+                        await db_set_file_id(item_hash, file_id)
                 await editor.update("Done.", force=True)
     except Exception as exc:
         logger.exception("Job failed: %s", exc)
