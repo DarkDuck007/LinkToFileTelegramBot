@@ -242,7 +242,7 @@ def ascii_filename(name: str) -> str:
 
 def should_zip(path: Path) -> bool:
     suffix = path.suffix.lower()
-    return suffix not in {".png", ".jpg", ".jpeg", "mp3"}
+    return suffix not in {".png", ".jpg", ".jpeg", ".mp3"}
 
 
 def create_zip(source_path: Path, zip_path: Path) -> None:
