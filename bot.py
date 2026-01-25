@@ -1089,6 +1089,16 @@ async def handle_bale_key_request(
     if not entry:
         await api.edit_message_text(chat_id, status.get("message_id"), "Key not found.")
         return
+    cached_bale_ids = parse_bale_file_ids(entry.get("bale_file_id"))
+    if cached_bale_ids:
+        try:
+            for file_id in cached_bale_ids:
+                await api.send_document(chat_id, None, file_id=file_id)
+            await api.edit_message_text(chat_id, status.get("message_id"), "Done.")
+            return
+        except Exception as exc:
+            logger.exception("Bale cached send failed: %s", exc)
+            await db_update_key_entry(key, bale_file_id="")
     if entry.get("source") == "bale":
         bale_ids = parse_bale_file_ids(entry.get("bale_file_id"))
         if not bale_ids:
@@ -1096,9 +1106,15 @@ async def handle_bale_key_request(
                 chat_id, status.get("message_id"), "Key is missing Bale metadata."
             )
             return
-        for file_id in bale_ids:
-            await api.send_document(chat_id, None, file_id=file_id)
-        await api.edit_message_text(chat_id, status.get("message_id"), "Done.")
+        try:
+            for file_id in bale_ids:
+                await api.send_document(chat_id, None, file_id=file_id)
+            await api.edit_message_text(chat_id, status.get("message_id"), "Done.")
+        except Exception as exc:
+            logger.exception("Bale send failed: %s", exc)
+            await api.edit_message_text(
+                chat_id, status.get("message_id"), "Upload failed."
+            )
         return
     tg_chat_id = entry.get("tg_chat_id")
     tg_message_id = entry.get("tg_message_id")
@@ -1145,52 +1161,59 @@ async def poll_bale_updates(
             bale_api_offset = max(
                 bale_api_offset, update.get("update_id", 0) + 1
             )
-            message = update.get("message") or {}
-            chat = message.get("chat") or {}
-            chat_id = chat.get("id")
-            if chat_id is None:
-                continue
-            text = (message.get("text") or "").strip()
-            caption = (message.get("caption") or "").strip()
-            if caption and extract_key(caption):
-                await handle_bale_key_store(api, chat_id, message)
-                continue
-            if text:
-                key = extract_key(text)
-                if key:
-                    await handle_bale_key_request(api, bot_client, chat_id, key)
+            try:
+                message = update.get("message") or {}
+                chat = message.get("chat") or {}
+                chat_id = chat.get("id")
+                if chat_id is None:
                     continue
-                url = extract_url(text)
-                if url:
-                    if url in bale_pending_links_by_user[chat_id]:
-                        await api.send_message(
-                            chat_id, "I'm still trying to upload this one :("
+                text = (message.get("text") or "").strip()
+                caption = (message.get("caption") or "").strip()
+                if caption and extract_key(caption):
+                    await handle_bale_key_store(api, chat_id, message)
+                    continue
+                if text:
+                    key = extract_key(text)
+                    if key:
+                        await handle_bale_key_request(api, bot_client, chat_id, key)
+                        continue
+                    url = extract_url(text)
+                    if url:
+                        if url in bale_pending_links_by_user[chat_id]:
+                            await api.send_message(
+                                chat_id, "I'm still trying to upload this one :("
+                            )
+                            continue
+                        if bale_pending_by_user[chat_id] >= MAX_PENDING_PER_USER:
+                            await api.send_message(
+                                chat_id, "You already have 3 pending downloads."
+                            )
+                            continue
+                        bale_pending_by_user[chat_id] += 1
+                        bale_pending_links_by_user[chat_id].add(url)
+                        status_message = await api.send_message(
+                            chat_id, "Queued."
+                        )
+                        asyncio.create_task(
+                            process_bale_link(
+                                api,
+                                chat_id,
+                                chat_id,
+                                url,
+                                status_message.get("message_id"),
+                            )
                         )
                         continue
-                    if bale_pending_by_user[chat_id] >= MAX_PENDING_PER_USER:
-                        await api.send_message(
-                            chat_id, "You already have 3 pending downloads."
-                        )
+                    if text.lower() in {"ping", "/ping"}:
+                        await api.send_message(chat_id, "Pong!")
                         continue
-                    bale_pending_by_user[chat_id] += 1
-                    bale_pending_links_by_user[chat_id].add(url)
-                    status_message = await api.send_message(
-                        chat_id, "Queued."
-                    )
-                    asyncio.create_task(
-                        process_bale_link(
-                            api,
-                            chat_id,
-                            chat_id,
-                            url,
-                            status_message.get("message_id"),
-                        )
+                    await api.send_message(
+                        chat_id,
+                        "send me a link, a (key:keystring) message, or a file with a caption like (key:yourkey) :3",
                     )
                     continue
-                if text.lower() in {"ping", "/ping"}:
-                    await api.send_message(chat_id, "Pong!")
-                    continue
-                await api.send_message(chat_id, "send me a link, a (key:keystring) message, or a file with a caption like (key:yourkey) :3")
+            except Exception as exc:
+                logger.exception("Bale update handling failed: %s", exc)
                 continue
 
 
