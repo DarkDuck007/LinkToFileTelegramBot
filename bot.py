@@ -812,10 +812,10 @@ async def upload_path_to_bale(
     upload_items: list[tuple[Path, str]] = []
     if should_zip(file_path):
         zip_path = file_path.with_suffix(".zip")
-        create_zip(file_path, zip_path)
+        await asyncio.to_thread(create_zip, file_path, zip_path)
         zip_size = zip_path.stat().st_size
         if zip_size > BALE_ZIP_PART_BYTES:
-            parts = split_file(zip_path, BALE_ZIP_PART_BYTES)
+            parts = await asyncio.to_thread(split_file, zip_path, BALE_ZIP_PART_BYTES)
             upload_items.extend(
                 (part, f"{zip_path.name} (part {idx}/{len(parts)})")
                 for idx, part in enumerate(parts, start=1)
@@ -827,7 +827,7 @@ async def upload_path_to_bale(
 
     file_ids: list[str] = []
     for item_path, display_name in upload_items:
-        item_hash = compute_sha256(item_path)
+        item_hash = await asyncio.to_thread(compute_sha256, item_path)
         caption = f"Uploaded: {display_name}\nHash: {original_hash}"
         cached_file_id = await db_get_bale_file_id(item_hash)
         if cached_file_id:
@@ -1026,7 +1026,7 @@ async def process_bale_link(
                 if target_path.stat().st_size == 0:
                     await editor.update("Download failed.", force=True)
                     return
-                original_hash = compute_sha256(target_path)
+                original_hash = await asyncio.to_thread(compute_sha256, target_path)
                 await editor.update("Uploading...", force=True)
                 await upload_path_to_bale(api, chat_id, target_path, original_hash)
                 await editor.update("Done <3", force=True)
