@@ -80,6 +80,21 @@ class ThrottledEditor:
         self._last_update = now
 
 
+class BaleThrottledEditor:
+    def __init__(self, api: "BaleApi", chat_id: int, message_id: int) -> None:
+        self._api = api
+        self._chat_id = chat_id
+        self._message_id = message_id
+        self._last_update = 0.0
+
+    async def update(self, text: str, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_update < PROGRESS_INTERVAL_SECONDS:
+            return
+        await self._api.edit_message_text(self._chat_id, self._message_id, text)
+        self._last_update = now
+
+
 class BaleApi:
     def __init__(self, token: str, base_url: str) -> None:
         self._token = token
@@ -128,6 +143,21 @@ class BaleApi:
             "sendMessage", data={"chat_id": str(chat_id), "text": text}
         )
 
+    async def edit_message_text(
+        self, chat_id: int, message_id: int, text: str
+    ) -> dict | None:
+        try:
+            return await self.request(
+                "editMessageText",
+                data={
+                    "chat_id": str(chat_id),
+                    "message_id": str(message_id),
+                    "text": text,
+                },
+            )
+        except Exception:
+            return None
+
     async def send_document(
         self,
         chat_id: int,
@@ -173,6 +203,12 @@ per_user_semaphore: dict[int, asyncio.Semaphore] = defaultdict(
     lambda: asyncio.Semaphore(MAX_PENDING_PER_USER)
 )
 global_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+bale_pending_by_user: dict[int, int] = defaultdict(int)
+bale_pending_links_by_user: dict[int, set[str]] = defaultdict(set)
+bale_per_user_semaphore: dict[int, asyncio.Semaphore] = defaultdict(
+    lambda: asyncio.Semaphore(MAX_PENDING_PER_USER)
+)
+bale_global_semaphore = asyncio.Semaphore(4)
 bot_upload_target: str | None = None
 user_self_id: int | None = None
 bot_api_offset = 0
@@ -898,6 +934,63 @@ async def worker(bot_client: TelegramClient, user_client: TelegramClient) -> Non
             queue.task_done()
 
 
+async def process_bale_link(
+    api: BaleApi,
+    chat_id: int,
+    user_id: int,
+    url: str,
+    status_message_id: int,
+) -> None:
+    editor = BaleThrottledEditor(api, chat_id, status_message_id)
+    job_dir = DOWNLOAD_DIR / uuid.uuid4().hex
+    job_dir.mkdir(parents=True, exist_ok=True)
+    output_path = job_dir / "download.tmp"
+    await editor.update("Starting download...", force=True)
+    try:
+        async with bale_global_semaphore:
+            async with bale_per_user_semaphore[user_id]:
+                header_name, content_type, content_length = await probe_response_meta(
+                    url
+                )
+                if content_length is not None and content_length == 0:
+                    await editor.update("Download failed.", force=True)
+                    return
+                rc = await download_with_progress(url, output_path, editor)
+                if rc != 0:
+                    await editor.update("Download failed.", force=True)
+                    return
+                url_name = filename_from_url(url)
+                header_name = (
+                    re.sub(r'[<>:"/\\\\|?*]', "_", header_name).strip(" .")
+                    if header_name
+                    else ""
+                )
+                url_name = apply_html_extension(url_name, content_type)
+                header_name = apply_html_extension(header_name, content_type)
+                target_name = url_name or header_name or "untitled"
+                target_path = job_dir / target_name
+                if target_path.exists():
+                    stem = target_path.stem or "download"
+                    suffix = target_path.suffix
+                    target_path = job_dir / f"{stem}-{uuid.uuid4().hex}{suffix}"
+                output_path.rename(target_path)
+                if target_path.stat().st_size == 0:
+                    await editor.update("Download failed.", force=True)
+                    return
+                original_hash = compute_sha256(target_path)
+                await editor.update("Uploading...", force=True)
+                await upload_path_to_bale(api, chat_id, target_path, original_hash)
+                await editor.update("Done.", force=True)
+    except Exception as exc:
+        logger.exception("Bale link job failed: %s", exc)
+        await editor.update("Download failed.", force=True)
+    finally:
+        if job_dir.exists():
+            shutil.rmtree(job_dir, ignore_errors=True)
+        bale_pending_by_user[user_id] = max(0, bale_pending_by_user[user_id] - 1)
+        bale_pending_links_by_user[user_id].discard(url)
+
+
 async def handle_telegram_key_store(
     event: events.NewMessage.Event, key: str
 ) -> None:
@@ -1054,6 +1147,33 @@ async def poll_bale_updates(
                 key = extract_key(text)
                 if key:
                     await handle_bale_key_request(api, bot_client, chat_id, key)
+                    continue
+                url = extract_url(text)
+                if url:
+                    if url in bale_pending_links_by_user[chat_id]:
+                        await api.send_message(
+                            chat_id, "I'm still trying to upload this one :("
+                        )
+                        continue
+                    if bale_pending_by_user[chat_id] >= MAX_PENDING_PER_USER:
+                        await api.send_message(
+                            chat_id, "You already have 3 pending downloads."
+                        )
+                        continue
+                    bale_pending_by_user[chat_id] += 1
+                    bale_pending_links_by_user[chat_id].add(url)
+                    status_message = await api.send_message(
+                        chat_id, "Queued."
+                    )
+                    asyncio.create_task(
+                        process_bale_link(
+                            api,
+                            chat_id,
+                            chat_id,
+                            url,
+                            status_message.get("message_id"),
+                        )
+                    )
                     continue
                 if text.lower() in {"ping", "/ping"}:
                     await api.send_message(chat_id, "Pong!")
