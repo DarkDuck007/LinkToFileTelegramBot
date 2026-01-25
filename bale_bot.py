@@ -29,7 +29,7 @@ PROGRESS_INTERVAL_SECONDS = 20
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 SIZE_LIMIT_EXCEEDED = 3
 
-URL_RE = re.compile(r"(https?://\\S+)")
+URL_RE = re.compile(r"(https?://\S+)")
 
 logging.basicConfig(
     level=logging.INFO,
