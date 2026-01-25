@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+import requests
 from telethon import TelegramClient, events
 from telethon.errors import RPCError
 
@@ -30,6 +31,10 @@ USER_PHONE = os.environ["TELETHON_PHONE"]
 USER_PASSWORD = os.environ.get("TELETHON_PASSWORD")
 DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", "downloads"))
 DB_PATH = Path(os.environ.get("HASH_DB_PATH", "hash_cache.db"))
+BALE_BOT_TOKEN = os.environ.get("BALE_BOT_TOKEN")
+BALE_API_URL = os.environ.get("BALE_API_URL", "https://tapi.bale.ai")
+BALE_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+BALE_ZIP_PART_BYTES = 30 * 1024 * 1024
 
 MAX_CONCURRENT_DOWNLOADS = 10
 MAX_PENDING_PER_USER = 3
@@ -39,6 +44,7 @@ MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 SIZE_LIMIT_EXCEEDED = 3
 
 URL_RE = re.compile(r"(https?://\S+)")
+KEY_RE = re.compile(r"(?i)\bkey:(.+)")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,6 +80,92 @@ class ThrottledEditor:
         self._last_update = now
 
 
+class BaleApi:
+    def __init__(self, token: str, base_url: str) -> None:
+        self._token = token
+        self._base_url = base_url.rstrip("/")
+
+    def _request_sync(
+        self,
+        method: str,
+        data: dict[str, str] | None = None,
+        files: dict | None = None,
+        timeout: int | tuple[int, int] = 30,
+    ) -> dict:
+        url = f"{self._base_url}/bot{self._token}/{method}"
+        resp = requests.post(url, data=data, files=files, timeout=timeout)
+        if not resp.ok:
+            body = resp.text.strip()
+            raise RuntimeError(
+                f"{method} failed ({resp.status_code}): {body or 'no response body'}"
+            )
+        payload = resp.json()
+        if not payload.get("ok"):
+            raise RuntimeError(payload.get("description", f"{method} failed"))
+        return payload["result"]
+
+    async def request(
+        self,
+        method: str,
+        data: dict[str, str] | None = None,
+        files: dict | None = None,
+        timeout: int | tuple[int, int] = 30,
+    ) -> dict:
+        return await asyncio.to_thread(
+            self._request_sync, method, data, files, timeout
+        )
+
+    async def get_updates(self, offset: int, timeout_seconds: int = 5) -> list[dict]:
+        result = await self.request(
+            "getUpdates",
+            data={"offset": str(offset), "timeout": str(timeout_seconds)},
+            timeout=timeout_seconds + 15,
+        )
+        return result or []
+
+    async def send_message(self, chat_id: int, text: str) -> dict:
+        return await self.request(
+            "sendMessage", data={"chat_id": str(chat_id), "text": text}
+        )
+
+    async def send_document(
+        self,
+        chat_id: int,
+        caption: str | None,
+        file_id: str | None = None,
+        file_path: Path | None = None,
+        filename: str | None = None,
+    ) -> dict:
+        if file_id:
+            data = {"chat_id": str(chat_id), "document": file_id}
+            if caption:
+                data["caption"] = caption
+            return await self.request("sendDocument", data=data, timeout=60)
+        if not file_path:
+            raise ValueError("file_path is required when no file_id is provided")
+
+        def _upload() -> dict:
+            data = {"chat_id": str(chat_id)}
+            if caption:
+                data["caption"] = caption
+            safe_name = ascii_filename(filename or file_path.name)
+            with file_path.open("rb") as handle:
+                files = {
+                    "document": (safe_name, handle, "application/octet-stream")
+                }
+                return self._request_sync(
+                    "sendDocument", data=data, files=files, timeout=(10, 300)
+                )
+
+        return await asyncio.to_thread(_upload)
+
+    async def get_file(self, file_id: str) -> dict:
+        return await self.request("getFile", data={"file_id": file_id})
+
+    def file_url(self, file_path: str) -> str:
+        return f"{self._base_url}/file/bot{self._token}/{file_path}"
+
+
 queue: asyncio.Queue[Job] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
 pending_by_user: dict[int, int] = defaultdict(int)
 pending_links_by_user: dict[int, set[str]] = defaultdict(set)
@@ -87,6 +179,8 @@ bot_api_offset = 0
 bot_api_lock = asyncio.Lock()
 db_lock = asyncio.Lock()
 db_conn: sqlite3.Connection | None = None
+bale_api_offset = 0
+bale_api: BaleApi | None = None
 
 
 def bytes_to_mb(value: int) -> float:
@@ -99,6 +193,42 @@ def filename_from_url(url: str) -> str:
     basename = re.sub(r'[<>:"/\\\\|?*]', "_", basename)
     basename = basename.strip(" .")
     return basename
+
+
+def ascii_filename(name: str) -> str:
+    if not name:
+        return "file"
+    sanitized = "".join(ch if ord(ch) < 128 else "_" for ch in name)
+    sanitized = re.sub(r'[<>:"/\\\\|?*]', "_", sanitized).strip(" .")
+    return sanitized or "file"
+
+
+def should_zip(path: Path) -> bool:
+    suffix = path.suffix.lower()
+    return suffix not in {".png", ".jpg", ".jpeg"}
+
+
+def create_zip(source_path: Path, zip_path: Path) -> None:
+    import zipfile
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(source_path, arcname=source_path.name)
+
+
+def split_file(path: Path, part_size: int) -> list[Path]:
+    parts: list[Path] = []
+    index = 1
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(part_size)
+            if not chunk:
+                break
+            part_path = path.with_name(f"{path.stem}.part{index:02d}.zip")
+            with part_path.open("wb") as part_handle:
+                part_handle.write(chunk)
+            parts.append(part_path)
+            index += 1
+    return parts
 
 
 def filename_from_header(value: str) -> str | None:
@@ -226,6 +356,12 @@ def compute_sha256(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def make_temp_dir(prefix: str) -> Path:
+    path = DOWNLOAD_DIR / f"{prefix}-{uuid.uuid4().hex}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 async def upload_with_progress(
     user_client: TelegramClient,
     target: object,
@@ -347,6 +483,129 @@ async def db_delete_hash(file_hash: str) -> None:
         db_conn.commit()
 
 
+async def db_get_bale_file_id(file_hash: str) -> str | None:
+    if db_conn is None:
+        return None
+    async with db_lock:
+        cursor = db_conn.execute(
+            "SELECT file_id FROM bale_file_cache WHERE hash = ?", (file_hash,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+
+async def db_set_bale_file_id(file_hash: str, file_id: str) -> None:
+    if db_conn is None:
+        return
+    async with db_lock:
+        db_conn.execute(
+            "INSERT OR REPLACE INTO bale_file_cache(hash, file_id) VALUES(?, ?)",
+            (file_hash, file_id),
+        )
+        db_conn.commit()
+
+
+async def db_delete_bale_hash(file_hash: str) -> None:
+    if db_conn is None:
+        return
+    async with db_lock:
+        db_conn.execute("DELETE FROM bale_file_cache WHERE hash = ?", (file_hash,))
+        db_conn.commit()
+
+
+async def db_get_key_entry(key: str) -> dict | None:
+    if db_conn is None:
+        return None
+    async with db_lock:
+        cursor = db_conn.execute(
+            "SELECT key, source, tg_chat_id, tg_message_id, bale_file_id, filename, file_hash "
+            "FROM key_cache WHERE key = ?",
+            (key,),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return None
+    return {
+        "key": row[0],
+        "source": row[1],
+        "tg_chat_id": row[2],
+        "tg_message_id": row[3],
+        "bale_file_id": row[4],
+        "filename": row[5],
+        "file_hash": row[6],
+    }
+
+
+async def db_insert_key_entry(
+    key: str,
+    source: str,
+    tg_chat_id: int | None = None,
+    tg_message_id: int | None = None,
+    bale_file_id: str | None = None,
+    filename: str | None = None,
+    file_hash: str | None = None,
+) -> bool:
+    if db_conn is None:
+        return False
+    async with db_lock:
+        cursor = db_conn.execute("SELECT 1 FROM key_cache WHERE key = ?", (key,))
+        if cursor.fetchone():
+            return False
+        db_conn.execute(
+            "INSERT INTO key_cache(key, source, tg_chat_id, tg_message_id, bale_file_id, filename, file_hash) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?)",
+            (
+                key,
+                source,
+                tg_chat_id,
+                tg_message_id,
+                bale_file_id,
+                filename,
+                file_hash,
+            ),
+        )
+        db_conn.commit()
+        return True
+
+
+async def db_update_key_entry(
+    key: str,
+    tg_chat_id: int | None = None,
+    tg_message_id: int | None = None,
+    bale_file_id: str | None = None,
+    filename: str | None = None,
+    file_hash: str | None = None,
+) -> None:
+    if db_conn is None:
+        return
+    fields: list[str] = []
+    values: list[object] = []
+    if tg_chat_id is not None:
+        fields.append("tg_chat_id = ?")
+        values.append(tg_chat_id)
+    if tg_message_id is not None:
+        fields.append("tg_message_id = ?")
+        values.append(tg_message_id)
+    if bale_file_id is not None:
+        fields.append("bale_file_id = ?")
+        values.append(bale_file_id)
+    if filename is not None:
+        fields.append("filename = ?")
+        values.append(filename)
+    if file_hash is not None:
+        fields.append("file_hash = ?")
+        values.append(file_hash)
+    if not fields:
+        return
+    values.append(key)
+    async with db_lock:
+        db_conn.execute(
+            f"UPDATE key_cache SET {', '.join(fields)} WHERE key = ?",
+            tuple(values),
+        )
+        db_conn.commit()
+
+
 async def find_bot_message_id(
     filename: str, file_hash: str, file_size: int, timeout_seconds: int = 30
 ) -> int | None:
@@ -374,6 +633,159 @@ async def find_bot_message_id(
                 return message.get("message_id")
         await asyncio.sleep(1)
     return None
+
+
+def extract_bale_file_id(message: dict) -> str | None:
+    document = message.get("document") or {}
+    if document.get("file_id"):
+        return document.get("file_id")
+    photo = message.get("photo") or []
+    if photo:
+        return photo[-1].get("file_id")
+    return None
+
+
+def parse_bale_file_ids(value: str | None) -> list[str]:
+    if not value:
+        return []
+    if value.startswith("["):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return [value]
+        return [item for item in parsed if isinstance(item, str)]
+    return [value]
+
+
+async def download_telegram_media(
+    bot_client: TelegramClient, chat_id: int, message_id: int, dest_dir: Path
+) -> Path | None:
+    message = await bot_client.get_messages(chat_id, ids=message_id)
+    if not message or not message.media:
+        return None
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    downloaded = await bot_client.download_media(message, file=str(dest_dir))
+    if not downloaded:
+        return None
+    return Path(str(downloaded))
+
+
+async def download_bale_media(
+    api: BaleApi, file_id: str, dest_dir: Path
+) -> Path | None:
+    info = await api.get_file(file_id)
+    file_path = info.get("file_path")
+    if not file_path:
+        return None
+    url = api.file_url(file_path)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    filename = Path(file_path).name
+    target_path = dest_dir / filename
+    with requests.get(url, stream=True, timeout=(10, 120)) as resp:
+        resp.raise_for_status()
+        with target_path.open("wb") as handle:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                handle.write(chunk)
+    return target_path
+
+
+async def relay_telegram_cached(
+    chat_id: int, from_chat_id: int, message_id: int, caption: str | None
+) -> None:
+    await copy_message_via_bot_api(chat_id, from_chat_id, message_id, caption)
+
+
+async def upload_path_to_telegram(
+    bot_client: TelegramClient,
+    user_client: TelegramClient,
+    chat_id: int,
+    file_path: Path,
+    caption: str | None,
+) -> None:
+    if user_self_id is None or not bot_upload_target:
+        raise RuntimeError("Bot relay is not configured.")
+    file_hash = compute_sha256(file_path)
+    cached_message_id = await db_get_message_id(file_hash)
+    if cached_message_id is not None:
+        await relay_telegram_cached(chat_id, user_self_id, cached_message_id, caption)
+        return
+    upload_message = await user_client.send_file(
+        bot_upload_target,
+        file_path,
+        caption=caption or None,
+        parse_mode=None,
+    )
+    upload_message_id = (
+        upload_message[0].id if isinstance(upload_message, list) else upload_message.id
+    )
+    file_size = file_path.stat().st_size
+    bot_message_id = await find_bot_message_id(file_path.name, file_hash, file_size)
+    if bot_message_id is None:
+        raise RuntimeError("Bot could not see uploaded media.")
+    await db_set_message_id(file_hash, bot_message_id)
+    await relay_telegram_cached(chat_id, user_self_id, bot_message_id, caption)
+
+
+async def upload_path_to_bale(
+    api: BaleApi,
+    chat_id: int,
+    file_path: Path,
+    original_hash: str,
+) -> list[str]:
+    upload_items: list[tuple[Path, str]] = []
+    if should_zip(file_path):
+        zip_path = file_path.with_suffix(".zip")
+        create_zip(file_path, zip_path)
+        zip_size = zip_path.stat().st_size
+        if zip_size > BALE_ZIP_PART_BYTES:
+            parts = split_file(zip_path, BALE_ZIP_PART_BYTES)
+            upload_items.extend(
+                (part, f"{zip_path.name} (part {idx}/{len(parts)})")
+                for idx, part in enumerate(parts, start=1)
+            )
+        else:
+            upload_items.append((zip_path, zip_path.name))
+    else:
+        upload_items.append((file_path, file_path.name))
+
+    file_ids: list[str] = []
+    for item_path, display_name in upload_items:
+        item_hash = compute_sha256(item_path)
+        caption = f"Uploaded: {display_name}\nHash: {original_hash}"
+        cached_file_id = await db_get_bale_file_id(item_hash)
+        if cached_file_id:
+            await api.send_document(chat_id, caption, file_id=cached_file_id)
+            file_ids.append(cached_file_id)
+            continue
+        upload_filename = item_path.name
+        message = None
+        for attempt in range(3):
+            try:
+                message = await api.send_document(
+                    chat_id,
+                    caption,
+                    file_path=item_path,
+                    filename=upload_filename,
+                )
+                break
+            except RuntimeError as exc:
+                error_text = str(exc).lower()
+                if (
+                    "failed to upload file bytes" not in error_text
+                    and "504" not in error_text
+                ):
+                    raise
+                if attempt == 2:
+                    raise
+                upload_filename = uuid.uuid4().hex
+                await asyncio.sleep(2 * (attempt + 1))
+        file_id = extract_bale_file_id(message or {})
+        if file_id:
+            await db_set_bale_file_id(item_hash, file_id)
+            file_ids.append(file_id)
+    return file_ids
 
 
 async def process_job(
@@ -486,6 +898,168 @@ async def worker(bot_client: TelegramClient, user_client: TelegramClient) -> Non
             queue.task_done()
 
 
+async def handle_telegram_key_store(
+    event: events.NewMessage.Event, key: str
+) -> None:
+    message = event.message
+    filename = None
+    if message and message.file:
+        filename = message.file.name
+    success = await db_insert_key_entry(
+        key,
+        "telegram",
+        tg_chat_id=event.chat_id,
+        tg_message_id=message.id if message else None,
+        filename=filename,
+    )
+    if not success:
+        await event.reply("Key already exists.")
+        return
+    await event.reply("Key saved.")
+
+
+async def handle_telegram_key_request(
+    bot_client: TelegramClient,
+    user_client: TelegramClient,
+    event: events.NewMessage.Event,
+    key: str,
+) -> None:
+    entry = await db_get_key_entry(key)
+    if not entry:
+        await event.reply("Key not found.")
+        return
+    if entry.get("source") == "telegram":
+        tg_chat_id = entry.get("tg_chat_id")
+        tg_message_id = entry.get("tg_message_id")
+        if tg_chat_id is None or tg_message_id is None:
+            await event.reply("Key is missing Telegram metadata.")
+            return
+        await relay_telegram_cached(event.chat_id, tg_chat_id, tg_message_id, None)
+        return
+    if bale_api is None:
+        await event.reply("Bale bot is not configured.")
+        return
+    bale_ids = parse_bale_file_ids(entry.get("bale_file_id"))
+    if not bale_ids:
+        await event.reply("Key is missing Bale metadata.")
+        return
+    temp_dir = make_temp_dir("bale-to-telegram")
+    try:
+        file_path = await download_bale_media(bale_api, bale_ids[0], temp_dir)
+        if not file_path:
+            await event.reply("Download failed.")
+            return
+        file_hash = compute_sha256(file_path)
+        await db_update_key_entry(key, file_hash=file_hash)
+        await upload_path_to_telegram(bot_client, user_client, event.chat_id, file_path, None)
+    finally:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+async def handle_bale_key_store(api: BaleApi, chat_id: int, message: dict) -> None:
+    caption = (message.get("caption") or "").strip()
+    key = extract_key(caption)
+    if not key:
+        return
+    file_id = extract_bale_file_id(message)
+    if not file_id:
+        await api.send_message(chat_id, "Key requires a file.")
+        return
+    filename = None
+    document = message.get("document") or {}
+    if document:
+        filename = document.get("file_name")
+    success = await db_insert_key_entry(
+        key,
+        "bale",
+        bale_file_id=file_id,
+        filename=filename,
+    )
+    if not success:
+        await api.send_message(chat_id, "Key already exists.")
+        return
+    await api.send_message(chat_id, "Key saved.")
+
+
+async def handle_bale_key_request(
+    api: BaleApi,
+    bot_client: TelegramClient,
+    chat_id: int,
+    key: str,
+) -> None:
+    entry = await db_get_key_entry(key)
+    if not entry:
+        await api.send_message(chat_id, "Key not found.")
+        return
+    if entry.get("source") == "bale":
+        bale_ids = parse_bale_file_ids(entry.get("bale_file_id"))
+        if not bale_ids:
+            await api.send_message(chat_id, "Key is missing Bale metadata.")
+            return
+        for file_id in bale_ids:
+            await api.send_document(chat_id, None, file_id=file_id)
+        return
+    tg_chat_id = entry.get("tg_chat_id")
+    tg_message_id = entry.get("tg_message_id")
+    if tg_chat_id is None or tg_message_id is None:
+        await api.send_message(chat_id, "Key is missing Telegram metadata.")
+        return
+    temp_dir = make_temp_dir("telegram-to-bale")
+    try:
+        file_path = await download_telegram_media(
+            bot_client, tg_chat_id, tg_message_id, temp_dir
+        )
+        if not file_path:
+            await api.send_message(chat_id, "Download failed.")
+            return
+        original_hash = compute_sha256(file_path)
+        file_ids = await upload_path_to_bale(api, chat_id, file_path, original_hash)
+        if file_ids:
+            bale_value = json.dumps(file_ids) if len(file_ids) > 1 else file_ids[0]
+            await db_update_key_entry(
+                key, bale_file_id=bale_value, file_hash=original_hash
+            )
+    finally:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+async def poll_bale_updates(
+    api: BaleApi, bot_client: TelegramClient, user_client: TelegramClient
+) -> None:
+    global bale_api_offset
+    while True:
+        try:
+            updates = await api.get_updates(bale_api_offset, timeout_seconds=5)
+        except Exception as exc:
+            logger.exception("Bale getUpdates failed: %s", exc)
+            await asyncio.sleep(2)
+            continue
+        for update in updates:
+            bale_api_offset = max(
+                bale_api_offset, update.get("update_id", 0) + 1
+            )
+            message = update.get("message") or {}
+            chat = message.get("chat") or {}
+            chat_id = chat.get("id")
+            if chat_id is None:
+                continue
+            text = (message.get("text") or "").strip()
+            caption = (message.get("caption") or "").strip()
+            if caption and extract_key(caption):
+                await handle_bale_key_store(api, chat_id, message)
+                continue
+            if text:
+                key = extract_key(text)
+                if key:
+                    await handle_bale_key_request(api, bot_client, chat_id, key)
+                    continue
+                if text.lower() in {"ping", "/ping"}:
+                    await api.send_message(chat_id, "Pong!")
+                    continue
+
+
 def extract_url(text: str) -> str | None:
     match = URL_RE.search(text)
     if not match:
@@ -493,9 +1067,19 @@ def extract_url(text: str) -> str | None:
     return match.group(1)
 
 
+def extract_key(text: str) -> str | None:
+    match = KEY_RE.search(text)
+    if not match:
+        return None
+    key = match.group(1).strip()
+    return key or None
+
+
 async def main() -> None:
     if shutil.which("wget") is None:
         raise RuntimeError("wget not found in PATH.")
+    if BALE_BOT_TOKEN is None:
+        raise RuntimeError("BALE_BOT_TOKEN is required for Bale integration.")
 
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -519,16 +1103,46 @@ async def main() -> None:
         "message_id INTEGER NOT NULL)"
     )
     db_conn.execute("CREATE INDEX IF NOT EXISTS idx_file_cache_hash ON file_cache(hash)")
+    db_conn.execute(
+        "CREATE TABLE IF NOT EXISTS bale_file_cache ("
+        "hash TEXT PRIMARY KEY,"
+        "file_id TEXT NOT NULL)"
+    )
+    db_conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bale_file_cache_hash "
+        "ON bale_file_cache(hash)"
+    )
+    db_conn.execute(
+        "CREATE TABLE IF NOT EXISTS key_cache ("
+        "key TEXT PRIMARY KEY,"
+        "source TEXT NOT NULL,"
+        "tg_chat_id INTEGER,"
+        "tg_message_id INTEGER,"
+        "bale_file_id TEXT,"
+        "filename TEXT,"
+        "file_hash TEXT)"
+    )
     db_conn.commit()
 
     for _ in range(MAX_CONCURRENT_DOWNLOADS):
         asyncio.create_task(worker(bot_client, user_client))
+
+    global bale_api
+    bale_api = BaleApi(BALE_BOT_TOKEN, BALE_API_URL)
+    asyncio.create_task(poll_bale_updates(bale_api, bot_client, user_client))
 
     @bot_client.on(events.NewMessage(incoming=True))
     async def handler(event: events.NewMessage.Event) -> None:
         if user_self_id is not None and event.sender_id == user_self_id:
             return
         text = (event.raw_text or "").strip()
+        key = extract_key(text)
+        if event.message and event.message.media and key:
+            await handle_telegram_key_store(event, key)
+            return
+        if key and not (event.message and event.message.media):
+            await handle_telegram_key_request(bot_client, user_client, event, key)
+            return
         lowered = text.lower()
         if lowered in {"ping", "/ping"}:
             await event.reply("Pong!")
