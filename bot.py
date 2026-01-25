@@ -14,6 +14,7 @@ import hashlib
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Coroutine
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -202,6 +203,29 @@ class BaleApi:
 
     def file_url(self, file_path: str) -> str:
         return f"{self._base_url}/file/bot{self._token}/{file_path}"
+
+
+def _log_bale_task_result(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except Exception as exc:
+        logger.exception("Bale background task failed: %s", exc)
+
+
+def _spawn_bale_task(coro: Coroutine[Any, Any, Any], label: str) -> None:
+    task = asyncio.create_task(coro, name=label)
+    task.add_done_callback(_log_bale_task_result)
+
+
+async def _prime_bale_offset(api: BaleApi) -> None:
+    global bale_api_offset
+    try:
+        updates = await api.get_updates(bale_api_offset, timeout_seconds=0)
+    except Exception as exc:
+        logger.exception("Bale getUpdates warmup failed: %s", exc)
+        return
+    for update in updates:
+        bale_api_offset = max(bale_api_offset, update.get("update_id", 0) + 1)
 
 
 queue: asyncio.Queue[Job] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
@@ -1299,7 +1323,7 @@ async def handle_bale_key_request(
                 chat_id, status.get("message_id"), "Download failed."
             )
             return
-        original_hash = compute_sha256(file_path)
+        original_hash = await asyncio.to_thread(compute_sha256, file_path)
         file_ids = await upload_path_to_bale(api, chat_id, file_path, original_hash)
         if file_ids:
             bale_value = json.dumps(file_ids) if len(file_ids) > 1 else file_ids[0]
@@ -1408,6 +1432,9 @@ async def poll_bale_updates(
                 chat_id = chat.get("id")
                 if chat_id is None:
                     continue
+                sender = message.get("from") or {}
+                if sender.get("is_bot"):
+                    continue
                 text = (message.get("text") or "").strip()
                 caption = (message.get("caption") or "").strip()
                 if caption and extract_key(caption):
@@ -1422,13 +1449,19 @@ async def poll_bale_updates(
                         continue
                     hash_query = extract_hash_query(text)
                     if hash_query:
-                        await handle_bale_hash_request(
-                            api, bot_client, chat_id, hash_query
+                        _spawn_bale_task(
+                            handle_bale_hash_request(
+                                api, bot_client, chat_id, hash_query
+                            ),
+                            "bale-hash-request",
                         )
                         continue
                     key = extract_key(text)
                     if key:
-                        await handle_bale_key_request(api, bot_client, chat_id, key)
+                        _spawn_bale_task(
+                            handle_bale_key_request(api, bot_client, chat_id, key),
+                            "bale-key-request",
+                        )
                         continue
                     url = extract_url(text)
                     if url:
@@ -1447,14 +1480,15 @@ async def poll_bale_updates(
                         status_message = await api.send_message(
                             chat_id, "Queued."
                         )
-                        asyncio.create_task(
+                        _spawn_bale_task(
                             process_bale_link(
                                 api,
                                 chat_id,
                                 chat_id,
                                 url,
                                 status_message.get("message_id"),
-                            )
+                            ),
+                            "bale-link",
                         )
                         continue
                     if text.lower() in {"ping", "/ping"}:
@@ -1563,6 +1597,7 @@ async def main() -> None:
 
     global bale_api
     bale_api = BaleApi(BALE_BOT_TOKEN, BALE_API_URL)
+    await _prime_bale_offset(bale_api)
     asyncio.create_task(poll_bale_updates(bale_api, bot_client, user_client))
 
     @bot_client.on(events.NewMessage(incoming=True))
