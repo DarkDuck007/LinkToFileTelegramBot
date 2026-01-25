@@ -35,6 +35,7 @@ BALE_BOT_TOKEN = os.environ.get("BALE_BOT_TOKEN")
 BALE_API_URL = os.environ.get("BALE_API_URL", "https://tapi.bale.ai")
 BALE_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 BALE_ZIP_PART_BYTES = 40 * 1024 * 1024
+BALE_UPLOAD_TIMEOUT_SECONDS = int(os.environ.get("BALE_UPLOAD_TIMEOUT_SECONDS", "1800"))
 
 MAX_CONCURRENT_DOWNLOADS = 10
 MAX_PENDING_PER_USER = 3
@@ -109,7 +110,10 @@ class BaleApi:
         timeout: int | tuple[int, int] = 30,
     ) -> dict:
         url = f"{self._base_url}/bot{self._token}/{method}"
-        resp = requests.post(url, data=data, files=files, timeout=timeout)
+        try:
+            resp = requests.post(url, data=data, files=files, timeout=timeout)
+        except requests.RequestException as exc:
+            raise RuntimeError(f"{method} request failed: {exc}") from exc
         if not resp.ok:
             body = resp.text.strip()
             raise RuntimeError(
@@ -185,7 +189,10 @@ class BaleApi:
                     "document": (safe_name, handle, "application/octet-stream")
                 }
                 return self._request_sync(
-                    "sendDocument", data=data, files=files, timeout=(10, 300)
+                    "sendDocument",
+                    data=data,
+                    files=files,
+                    timeout=(10, BALE_UPLOAD_TIMEOUT_SECONDS),
                 )
 
         return await asyncio.to_thread(_upload)
@@ -840,10 +847,18 @@ async def upload_path_to_bale(
                 break
             except RuntimeError as exc:
                 error_text = str(exc).lower()
-                if (
-                    "failed to upload file bytes" not in error_text
-                    and "504" not in error_text
-                ):
+                retryable = any(
+                    token in error_text
+                    for token in (
+                        "failed to upload file bytes",
+                        "504",
+                        "timed out",
+                        "timeout",
+                        "connection aborted",
+                        "request failed",
+                    )
+                )
+                if not retryable:
                     raise
                 if attempt == 2:
                     raise

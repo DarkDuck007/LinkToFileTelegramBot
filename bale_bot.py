@@ -21,6 +21,7 @@ BOT_TOKEN = os.environ["BALE_BOT_TOKEN"]
 BOT_API_URL = os.environ.get("BALE_API_URL", "https://tapi.bale.ai")
 DOWNLOAD_DIR = Path(os.environ.get("BALE_DOWNLOAD_DIR", "bale_downloads"))
 DB_PATH = Path(os.environ.get("BALE_HASH_DB_PATH", "bale_hash_cache.db"))
+BALE_UPLOAD_TIMEOUT_SECONDS = int(os.environ.get("BALE_UPLOAD_TIMEOUT_SECONDS", "1800"))
 
 MAX_CONCURRENT_DOWNLOADS = 6
 MAX_PENDING_PER_USER = 3
@@ -61,7 +62,10 @@ class BaleApi:
         timeout: int | tuple[int, int] = 30,
     ) -> dict:
         url = f"{self._base_url}/bot{self._token}/{method}"
-        resp = requests.post(url, data=data, files=files, timeout=timeout)
+        try:
+            resp = requests.post(url, data=data, files=files, timeout=timeout)
+        except requests.RequestException as exc:
+            raise RuntimeError(f"{method} request failed: {exc}") from exc
         if not resp.ok:
             body = resp.text.strip()
             raise RuntimeError(
@@ -137,7 +141,10 @@ class BaleApi:
                     "document": (safe_name, handle, "application/octet-stream")
                 }
                 return self._request_sync(
-                    "sendDocument", data=data, files=files, timeout=(10, 300)
+                    "sendDocument",
+                    data=data,
+                    files=files,
+                    timeout=(10, BALE_UPLOAD_TIMEOUT_SECONDS),
                 )
 
         return await asyncio.to_thread(_upload)
@@ -483,10 +490,18 @@ async def process_job(api: BaleApi, job: Job) -> None:
                             break
                         except RuntimeError as exc:
                             error_text = str(exc).lower()
-                            if (
-                                "failed to upload file bytes" not in error_text
-                                and "504" not in error_text
-                            ):
+                            retryable = any(
+                                token in error_text
+                                for token in (
+                                    "failed to upload file bytes",
+                                    "504",
+                                    "timed out",
+                                    "timeout",
+                                    "connection aborted",
+                                    "request failed",
+                                )
+                            )
+                            if not retryable:
                                 raise
                             if attempt == 2:
                                 raise
