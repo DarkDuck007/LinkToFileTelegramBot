@@ -1178,6 +1178,8 @@ async def poll_bale_updates(
                 if text.lower() in {"ping", "/ping"}:
                     await api.send_message(chat_id, "Pong!")
                     continue
+                await api.send_message(chat_id, "Send me a link :3")
+                continue
 
 
 def extract_url(text: str) -> str | None:
