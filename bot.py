@@ -1447,7 +1447,7 @@ async def poll_bale_updates(
                         continue
                     await api.send_message(
                         chat_id,
-                        "send me a link, a (key:keystring) message, or a file with a caption like (key:yourkey) or forward any file and reply to it with /key <your key> :3",
+                        "send me a link, a (key:keystring) message, or a file with a caption like (key:yourkey) or forward any file and reply to it with /key <your key> or a file hash (hash: hashfrombefore) :3",
                     )
                     continue
             except Exception as exc:
@@ -1578,7 +1578,7 @@ async def main() -> None:
             return
         url = extract_url(text)
         if not url:
-            await event.reply("send me a link, a (key:keystring) message, or a file with a caption like (key:yourkey) or forward any file and reply to it with /key <your key> :3")
+            await event.reply("send me a link, a (key:keystring) message, or a file with a caption like (key:yourkey) or forward any file and reply to it with /key <your key> or a file hash (hash: hashfrombefore) :3")
             return
         user_id = event.sender_id
         if url in pending_links_by_user[user_id]:
