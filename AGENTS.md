@@ -24,3 +24,11 @@ A skill is a set of local instructions to follow that is stored in a `SKILL.md` 
   - When variants exist (frameworks, providers, domains), pick only the relevant reference file(s) and note that choice.
 - Safety and fallback: If a skill can't be applied cleanly (missing files, unclear instructions), state the issue, pick the next-best approach, and continue.
 </INSTRUCTIONS>
+
+## Project notes (2026-01-26)
+- `bot.py` is the single entrypoint; `bale_bot.py` was removed.
+- Bale update handling runs background tasks to keep polling responsive.
+- Bale updates ignore messages sent by bots to avoid self-trigger loops.
+- Large Bale uploads use a configurable timeout: `BALE_UPLOAD_TIMEOUT_SECONDS` (default 1800).
+- Heavy Bale work (zip/split/hash) is offloaded to threads to avoid blocking the event loop.
+- Unless requested, keep changes focused on the Bale side; Telegram side is currently working.
