@@ -200,6 +200,38 @@ class BaleApi:
 
         return await asyncio.to_thread(_upload)
 
+    async def send_photo(
+        self,
+        chat_id: int,
+        caption: str | None,
+        file_id: str | None = None,
+        file_path: Path | None = None,
+        filename: str | None = None,
+    ) -> dict:
+        if file_id:
+            data = {"chat_id": str(chat_id), "photo": file_id}
+            if caption:
+                data["caption"] = caption
+            return await self.request("sendPhoto", data=data, timeout=60)
+        if not file_path:
+            raise ValueError("file_path is required when no file_id is provided")
+
+        def _upload() -> dict:
+            data = {"chat_id": str(chat_id)}
+            if caption:
+                data["caption"] = caption
+            safe_name = ascii_filename(filename or file_path.name)
+            with file_path.open("rb") as handle:
+                files = {"photo": (safe_name, handle, "application/octet-stream")}
+                return self._request_sync(
+                    "sendPhoto",
+                    data=data,
+                    files=files,
+                    timeout=(10, BALE_UPLOAD_TIMEOUT_SECONDS),
+                )
+
+        return await asyncio.to_thread(_upload)
+
     async def get_file(self, file_id: str) -> dict:
         return await self.request("getFile", data={"file_id": file_id})
 
@@ -975,6 +1007,22 @@ def parse_bale_file_ids(value: str | None) -> list[str]:
             return [value]
         return [item for item in parsed if isinstance(item, str)]
     return [value]
+
+
+def is_telegram_photo(message: events.NewMessage.Event | None) -> bool:
+    if not message or not message.message:
+        return False
+    if message.message.photo:
+        return True
+    if message.message.document:
+        return False
+    return False
+
+
+def is_telegram_document(message: events.NewMessage.Event | None) -> bool:
+    if not message or not message.message:
+        return False
+    return bool(message.message.document)
 
 
 async def download_telegram_media(
@@ -1996,8 +2044,15 @@ async def forward_telegram_file_to_bale(
         )
         if not file_path:
             return
-        original_hash = await asyncio.to_thread(compute_sha256, file_path)
-        await upload_path_to_bale(api, bale_user_id, file_path, original_hash)
+        if is_telegram_photo(event):
+            await api.send_photo(bale_user_id, None, file_path=file_path)
+            return
+        filename = None
+        if event.message and event.message.file:
+            filename = event.message.file.name
+        await api.send_document(
+            bale_user_id, None, file_path=file_path, filename=filename
+        )
     finally:
         if temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -2030,18 +2085,21 @@ async def forward_bale_file_to_telegram(
         if not file_path:
             return
         document = message.get("document") or {}
-        original_name = document.get("file_name") or ""
-        safe_name = ascii_filename(original_name)
-        if safe_name and safe_name != file_path.name:
-            desired_path = file_path.with_name(safe_name)
-            try:
-                file_path.rename(desired_path)
-                file_path = desired_path
-            except OSError:
-                pass
-        await upload_path_to_telegram(
-            bot_client, user_client, link["tg_user_id"], file_path, None
-        )
+        if document:
+            original_name = document.get("file_name") or ""
+            safe_name = ascii_filename(original_name)
+            if safe_name and safe_name != file_path.name:
+                desired_path = file_path.with_name(safe_name)
+                try:
+                    file_path.rename(desired_path)
+                    file_path = desired_path
+                except OSError:
+                    pass
+            await user_client.send_file(
+                link["tg_user_id"], file_path, force_document=True
+            )
+            return
+        await user_client.send_file(link["tg_user_id"], file_path)
     finally:
         if temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
