@@ -30,6 +30,18 @@ Run:
 python bot.py
 ```
 
+## Auto forwarding
+
+Enable bi-directional auto forwarding between Telegram and Bale for a single user.
+
+Steps:
+
+1. On one side, send `/auto enable` to receive a UID.
+2. On the other side, send `/auto set <UID>`.
+3. Send any file to the bot on either side; it will forward to the other side.
+
+Disable with `/auto disable`.
+
 ## Notes
 
 - Max 10 concurrent downloads, max 3 pending per user, queue size 100.

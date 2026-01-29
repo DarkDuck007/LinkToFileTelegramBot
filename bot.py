@@ -56,6 +56,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("linktofile")
 
+AUTO_UID_LENGTH = 8
+
 
 @dataclass
 class Job:
@@ -436,6 +438,10 @@ def make_temp_dir(prefix: str) -> Path:
     return path
 
 
+def generate_auto_uid() -> str:
+    return uuid.uuid4().hex[:AUTO_UID_LENGTH]
+
+
 async def upload_with_progress(
     user_client: TelegramClient,
     target: object,
@@ -701,6 +707,182 @@ async def db_get_key_entry_by_hash(file_hash: str) -> dict | None:
         "filename": row[5],
         "file_hash": row[6],
     }
+
+
+async def db_get_auto_link_by_tg(tg_user_id: int) -> dict | None:
+    if db_conn is None:
+        return None
+    async with db_lock:
+        cursor = db_conn.execute(
+            "SELECT uid, tg_user_id, bale_user_id FROM auto_link WHERE tg_user_id = ?",
+            (tg_user_id,),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return None
+    return {"uid": row[0], "tg_user_id": row[1], "bale_user_id": row[2]}
+
+
+async def db_get_auto_link_by_bale(bale_user_id: int) -> dict | None:
+    if db_conn is None:
+        return None
+    async with db_lock:
+        cursor = db_conn.execute(
+            "SELECT uid, tg_user_id, bale_user_id FROM auto_link WHERE bale_user_id = ?",
+            (bale_user_id,),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return None
+    return {"uid": row[0], "tg_user_id": row[1], "bale_user_id": row[2]}
+
+
+async def db_get_auto_link_by_uid(uid: str) -> dict | None:
+    if db_conn is None:
+        return None
+    async with db_lock:
+        cursor = db_conn.execute(
+            "SELECT uid, tg_user_id, bale_user_id FROM auto_link WHERE uid = ?",
+            (uid,),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return None
+    return {"uid": row[0], "tg_user_id": row[1], "bale_user_id": row[2]}
+
+
+async def db_set_auto_link(uid: str, tg_user_id: int, bale_user_id: int) -> None:
+    if db_conn is None:
+        return
+    async with db_lock:
+        db_conn.execute(
+            "INSERT OR REPLACE INTO auto_link(uid, tg_user_id, bale_user_id) VALUES(?, ?, ?)",
+            (uid, tg_user_id, bale_user_id),
+        )
+        db_conn.commit()
+
+
+async def db_delete_auto_link_by_uid(uid: str) -> None:
+    if db_conn is None:
+        return
+    async with db_lock:
+        db_conn.execute("DELETE FROM auto_link WHERE uid = ?", (uid,))
+        db_conn.commit()
+
+
+async def db_delete_auto_link_by_tg(tg_user_id: int) -> None:
+    if db_conn is None:
+        return
+    async with db_lock:
+        db_conn.execute("DELETE FROM auto_link WHERE tg_user_id = ?", (tg_user_id,))
+        db_conn.commit()
+
+
+async def db_delete_auto_link_by_bale(bale_user_id: int) -> None:
+    if db_conn is None:
+        return
+    async with db_lock:
+        db_conn.execute("DELETE FROM auto_link WHERE bale_user_id = ?", (bale_user_id,))
+        db_conn.commit()
+
+
+async def db_get_auto_pending_by_uid(uid: str) -> dict | None:
+    if db_conn is None:
+        return None
+    async with db_lock:
+        cursor = db_conn.execute(
+            "SELECT uid, source, tg_user_id, bale_user_id FROM auto_pending WHERE uid = ?",
+            (uid,),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return None
+    return {
+        "uid": row[0],
+        "source": row[1],
+        "tg_user_id": row[2],
+        "bale_user_id": row[3],
+    }
+
+
+async def db_get_auto_pending_by_tg(tg_user_id: int) -> dict | None:
+    if db_conn is None:
+        return None
+    async with db_lock:
+        cursor = db_conn.execute(
+            "SELECT uid, source, tg_user_id, bale_user_id FROM auto_pending WHERE tg_user_id = ?",
+            (tg_user_id,),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return None
+    return {
+        "uid": row[0],
+        "source": row[1],
+        "tg_user_id": row[2],
+        "bale_user_id": row[3],
+    }
+
+
+async def db_get_auto_pending_by_bale(bale_user_id: int) -> dict | None:
+    if db_conn is None:
+        return None
+    async with db_lock:
+        cursor = db_conn.execute(
+            "SELECT uid, source, tg_user_id, bale_user_id FROM auto_pending WHERE bale_user_id = ?",
+            (bale_user_id,),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return None
+    return {
+        "uid": row[0],
+        "source": row[1],
+        "tg_user_id": row[2],
+        "bale_user_id": row[3],
+    }
+
+
+async def db_set_auto_pending(
+    uid: str,
+    source: str,
+    tg_user_id: int | None = None,
+    bale_user_id: int | None = None,
+) -> None:
+    if db_conn is None:
+        return
+    async with db_lock:
+        db_conn.execute(
+            "INSERT OR REPLACE INTO auto_pending(uid, source, tg_user_id, bale_user_id) VALUES(?, ?, ?, ?)",
+            (uid, source, tg_user_id, bale_user_id),
+        )
+        db_conn.commit()
+
+
+async def db_delete_auto_pending_by_uid(uid: str) -> None:
+    if db_conn is None:
+        return
+    async with db_lock:
+        db_conn.execute("DELETE FROM auto_pending WHERE uid = ?", (uid,))
+        db_conn.commit()
+
+
+async def db_delete_auto_pending_by_tg(tg_user_id: int) -> None:
+    if db_conn is None:
+        return
+    async with db_lock:
+        db_conn.execute("DELETE FROM auto_pending WHERE tg_user_id = ?", (tg_user_id,))
+        db_conn.commit()
+
+
+async def db_delete_auto_pending_by_bale(bale_user_id: int) -> None:
+    if db_conn is None:
+        return
+    async with db_lock:
+        db_conn.execute(
+            "DELETE FROM auto_pending WHERE bale_user_id = ?", (bale_user_id,)
+        )
+        db_conn.commit()
 
 
 async def find_bot_message_id(
@@ -1435,11 +1617,41 @@ async def poll_bale_updates(
                 sender = message.get("from") or {}
                 if sender.get("is_bot"):
                     continue
+                sender_id = sender.get("id", chat_id)
                 text = (message.get("text") or "").strip()
                 caption = (message.get("caption") or "").strip()
+                auto_cmd, auto_arg = parse_auto_command(text)
+                if auto_cmd:
+                    if auto_cmd == "enable":
+                        await handle_auto_enable_bale(api, chat_id, sender_id)
+                        continue
+                    if auto_cmd == "disable":
+                        await handle_auto_disable_bale(api, chat_id, sender_id)
+                        continue
+                    if auto_cmd == "set":
+                        await handle_auto_set_bale(api, chat_id, sender_id, auto_arg)
+                        continue
+                    await api.send_message(
+                        chat_id, "Usage: /auto enable | /auto disable | /auto set <UID>"
+                    )
+                    continue
+                message_has_file = extract_bale_file_id(message) is not None
+                handled_key = False
                 if caption and extract_key(caption):
                     await handle_bale_key_store(api, chat_id, message)
-                    continue
+                    handled_key = True
+                if message_has_file:
+                    link = await db_get_auto_link_by_bale(sender_id)
+                    if link:
+                        _spawn_bale_task(
+                            forward_bale_file_to_telegram(
+                                api, bot_client, user_client, sender_id, message
+                            ),
+                            "auto-bale-to-telegram",
+                        )
+                        continue
+                    if handled_key:
+                        continue
                 if text:
                     key_command = extract_key_command(text)
                     if key_command:
@@ -1543,6 +1755,214 @@ def extract_hash_query(text: str) -> str | None:
     return value
 
 
+def parse_auto_command(text: str) -> tuple[str | None, str | None]:
+    if not text:
+        return None, None
+    parts = text.strip().split()
+    if not parts:
+        return None, None
+    if not parts[0].lower().startswith("/auto"):
+        return None, None
+    if len(parts) == 1:
+        return "help", None
+    cmd = parts[1].lower()
+    arg = parts[2] if len(parts) > 2 else None
+    return cmd, arg
+
+
+async def handle_auto_enable_telegram(event: events.NewMessage.Event) -> None:
+    if event.sender_id is None:
+        await event.reply("Could not resolve your user id.")
+        return
+    existing = await db_get_auto_link_by_tg(event.sender_id)
+    if existing:
+        await event.reply(
+            f"Auto forwarding is already enabled. UID: {existing['uid']}"
+        )
+        return
+    pending = await db_get_auto_pending_by_tg(event.sender_id)
+    if pending:
+        await event.reply(
+            f"Auto link is pending. UID: {pending['uid']}\n"
+            "Use /auto set <UID> on the other side."
+        )
+        return
+    uid = generate_auto_uid()
+    await db_set_auto_pending(uid, "telegram", tg_user_id=event.sender_id)
+    await event.reply(
+        f"Auto link UID: {uid}\nUse /auto set {uid} on the other side."
+    )
+
+
+async def handle_auto_enable_bale(
+    api: BaleApi, chat_id: int, bale_user_id: int
+) -> None:
+    existing = await db_get_auto_link_by_bale(bale_user_id)
+    if existing:
+        await api.send_message(
+            chat_id, f"Auto forwarding is already enabled. UID: {existing['uid']}"
+        )
+        return
+    pending = await db_get_auto_pending_by_bale(bale_user_id)
+    if pending:
+        await api.send_message(
+            chat_id,
+            f"Auto link is pending. UID: {pending['uid']}\n"
+            "Use /auto set <UID> on the other side.",
+        )
+        return
+    uid = generate_auto_uid()
+    await db_set_auto_pending(uid, "bale", bale_user_id=bale_user_id)
+    await api.send_message(
+        chat_id, f"Auto link UID: {uid}\nUse /auto set {uid} on the other side."
+    )
+
+
+async def handle_auto_set_telegram(
+    event: events.NewMessage.Event, uid: str | None
+) -> None:
+    if not uid:
+        await event.reply("Usage: /auto set <UID>")
+        return
+    if event.sender_id is None:
+        await event.reply("Could not resolve your user id.")
+        return
+    existing = await db_get_auto_link_by_tg(event.sender_id)
+    if existing:
+        await event.reply(
+            f"Auto forwarding is already enabled. UID: {existing['uid']}"
+        )
+        return
+    linked_uid = await db_get_auto_link_by_uid(uid)
+    if linked_uid:
+        await event.reply("This UID is already linked.")
+        return
+    pending = await db_get_auto_pending_by_uid(uid)
+    if not pending:
+        await event.reply("UID not found or expired.")
+        return
+    if pending.get("tg_user_id"):
+        await event.reply("This UID must be set from the other side.")
+        return
+    bale_user_id = pending.get("bale_user_id")
+    if bale_user_id is None:
+        await event.reply("UID not found or incomplete.")
+        return
+    existing_bale = await db_get_auto_link_by_bale(bale_user_id)
+    if existing_bale:
+        await event.reply("This Bale user already has an active auto link.")
+        return
+    await db_set_auto_link(uid, event.sender_id, bale_user_id)
+    await db_delete_auto_pending_by_uid(uid)
+    await event.reply(
+        f"Auto forwarding enabled.\nTelegram user: {event.sender_id}\nBale user: {bale_user_id}"
+    )
+
+
+async def handle_auto_set_bale(
+    api: BaleApi, chat_id: int, bale_user_id: int, uid: str | None
+) -> None:
+    if not uid:
+        await api.send_message(chat_id, "Usage: /auto set <UID>")
+        return
+    existing = await db_get_auto_link_by_bale(bale_user_id)
+    if existing:
+        await api.send_message(
+            chat_id, f"Auto forwarding is already enabled. UID: {existing['uid']}"
+        )
+        return
+    linked_uid = await db_get_auto_link_by_uid(uid)
+    if linked_uid:
+        await api.send_message(chat_id, "This UID is already linked.")
+        return
+    pending = await db_get_auto_pending_by_uid(uid)
+    if not pending:
+        await api.send_message(chat_id, "UID not found or expired.")
+        return
+    if pending.get("bale_user_id"):
+        await api.send_message(chat_id, "This UID must be set from the other side.")
+        return
+    tg_user_id = pending.get("tg_user_id")
+    if tg_user_id is None:
+        await api.send_message(chat_id, "UID not found or incomplete.")
+        return
+    existing_tg = await db_get_auto_link_by_tg(tg_user_id)
+    if existing_tg:
+        await api.send_message(chat_id, "This Telegram user already has an active auto link.")
+        return
+    await db_set_auto_link(uid, tg_user_id, bale_user_id)
+    await db_delete_auto_pending_by_uid(uid)
+    await api.send_message(
+        chat_id,
+        f"Auto forwarding enabled.\nTelegram user: {tg_user_id}\nBale user: {bale_user_id}",
+    )
+
+
+async def handle_auto_disable_telegram(event: events.NewMessage.Event) -> None:
+    if event.sender_id is None:
+        await event.reply("Could not resolve your user id.")
+        return
+    await db_delete_auto_link_by_tg(event.sender_id)
+    await db_delete_auto_pending_by_tg(event.sender_id)
+    await event.reply("Auto forwarding disabled.")
+
+
+async def handle_auto_disable_bale(
+    api: BaleApi, chat_id: int, bale_user_id: int
+) -> None:
+    await db_delete_auto_link_by_bale(bale_user_id)
+    await db_delete_auto_pending_by_bale(bale_user_id)
+    await api.send_message(chat_id, "Auto forwarding disabled.")
+
+
+async def forward_telegram_file_to_bale(
+    bot_client: TelegramClient,
+    api: BaleApi,
+    event: events.NewMessage.Event,
+    bale_user_id: int,
+) -> None:
+    if not event.message:
+        return
+    temp_dir = make_temp_dir("telegram-auto")
+    try:
+        file_path = await download_telegram_media(
+            bot_client, event.chat_id, event.message.id, temp_dir
+        )
+        if not file_path:
+            return
+        original_hash = await asyncio.to_thread(compute_sha256, file_path)
+        await upload_path_to_bale(api, bale_user_id, file_path, original_hash)
+    finally:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+async def forward_bale_file_to_telegram(
+    api: BaleApi,
+    bot_client: TelegramClient,
+    user_client: TelegramClient,
+    bale_user_id: int,
+    message: dict,
+) -> None:
+    file_id = extract_bale_file_id(message)
+    if not file_id:
+        return
+    link = await db_get_auto_link_by_bale(bale_user_id)
+    if not link:
+        return
+    temp_dir = make_temp_dir("bale-auto")
+    try:
+        file_path = await download_bale_media(api, file_id, temp_dir)
+        if not file_path:
+            return
+        await upload_path_to_telegram(
+            bot_client, user_client, link["tg_user_id"], file_path, None
+        )
+    finally:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 async def main() -> None:
     if shutil.which("wget") is None:
         raise RuntimeError("wget not found in PATH.")
@@ -1590,6 +2010,19 @@ async def main() -> None:
         "filename TEXT,"
         "file_hash TEXT)"
     )
+    db_conn.execute(
+        "CREATE TABLE IF NOT EXISTS auto_link ("
+        "uid TEXT PRIMARY KEY,"
+        "tg_user_id INTEGER UNIQUE,"
+        "bale_user_id INTEGER UNIQUE)"
+    )
+    db_conn.execute(
+        "CREATE TABLE IF NOT EXISTS auto_pending ("
+        "uid TEXT PRIMARY KEY,"
+        "source TEXT NOT NULL,"
+        "tg_user_id INTEGER,"
+        "bale_user_id INTEGER)"
+    )
     db_conn.commit()
 
     for _ in range(MAX_CONCURRENT_DOWNLOADS):
@@ -1605,6 +2038,19 @@ async def main() -> None:
         if user_self_id is not None and event.sender_id == user_self_id:
             return
         text = (event.raw_text or "").strip()
+        auto_cmd, auto_arg = parse_auto_command(text)
+        if auto_cmd:
+            if auto_cmd == "enable":
+                await handle_auto_enable_telegram(event)
+                return
+            if auto_cmd == "disable":
+                await handle_auto_disable_telegram(event)
+                return
+            if auto_cmd == "set":
+                await handle_auto_set_telegram(event, auto_arg)
+                return
+            await event.reply("Usage: /auto enable | /auto disable | /auto set <UID>")
+            return
         key_command = extract_key_command(text)
         if key_command:
             await handle_telegram_key_reply_store(event, key_command)
@@ -1618,7 +2064,17 @@ async def main() -> None:
         key = extract_key(text)
         if event.message and event.message.media and key:
             await handle_telegram_key_store(event, key)
-            return
+        if event.message and event.message.media:
+            if bale_api is not None and event.sender_id is not None:
+                link = await db_get_auto_link_by_tg(event.sender_id)
+                if link:
+                    _spawn_bale_task(
+                        forward_telegram_file_to_bale(
+                            bot_client, bale_api, event, link["bale_user_id"]
+                        ),
+                        "auto-telegram-to-bale",
+                    )
+                    return
         if key and not (event.message and event.message.media):
             await handle_telegram_key_request(bot_client, user_client, event, key)
             return

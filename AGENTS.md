@@ -32,3 +32,4 @@ A skill is a set of local instructions to follow that is stored in a `SKILL.md` 
 - Large Bale uploads use a configurable timeout: `BALE_UPLOAD_TIMEOUT_SECONDS` (default 1800).
 - Heavy Bale work (zip/split/hash) is offloaded to threads to avoid blocking the event loop.
 - Unless requested, keep changes focused on the Bale side; Telegram side is currently working.
+- Auto forwarding: `/auto enable` gives a UID, `/auto set <UID>` links the other side, `/auto disable` clears; files sent to bot auto-forward across sides.
