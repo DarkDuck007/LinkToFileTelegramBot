@@ -275,7 +275,8 @@ def ascii_filename(name: str) -> str:
 
 def should_zip(path: Path) -> bool:
     suffix = path.suffix.lower()
-    return suffix not in {".png", ".jpg", ".jpeg", ".mp3"}
+    #return suffix not in {".png", ".jpg", ".jpeg", ".mp3", ".m4a", ".mp4", ".mkv"}
+    return suffix in {".apk", ".exe", ".apks"}
 
 
 def create_zip(source_path: Path, zip_path: Path) -> None:
@@ -960,13 +961,17 @@ async def download_bale_media(
     dest_dir.mkdir(parents=True, exist_ok=True)
     filename = Path(file_path).name
     target_path = dest_dir / filename
-    with requests.get(url, stream=True, timeout=(10, 120)) as resp:
-        resp.raise_for_status()
-        with target_path.open("wb") as handle:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                if not chunk:
-                    continue
-                handle.write(chunk)
+
+    def _download() -> None:
+        with requests.get(url, stream=True, timeout=(10, 120)) as resp:
+            resp.raise_for_status()
+            with target_path.open("wb") as handle:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    handle.write(chunk)
+
+    await asyncio.to_thread(_download)
     return target_path
 
 
@@ -1923,6 +1928,12 @@ async def forward_telegram_file_to_bale(
 ) -> None:
     if not event.message:
         return
+    sender_id = event.sender_id
+    if sender_id is not None:
+        await event.reply("Forwarding your file to Bale...")
+        await api.send_message(
+            bale_user_id, f"Incoming file from Telegram user {sender_id}."
+        )
     temp_dir = make_temp_dir("telegram-auto")
     try:
         file_path = await download_telegram_media(
@@ -1950,11 +1961,25 @@ async def forward_bale_file_to_telegram(
     link = await db_get_auto_link_by_bale(bale_user_id)
     if not link:
         return
+    await api.send_message(bale_user_id, "Forwarding your file to Telegram...")
+    await user_client.send_message(
+        link["tg_user_id"], f"Incoming file from Bale user {bale_user_id}."
+    )
     temp_dir = make_temp_dir("bale-auto")
     try:
         file_path = await download_bale_media(api, file_id, temp_dir)
         if not file_path:
             return
+        document = message.get("document") or {}
+        original_name = document.get("file_name") or ""
+        safe_name = ascii_filename(original_name)
+        if safe_name and safe_name != file_path.name:
+            desired_path = file_path.with_name(safe_name)
+            try:
+                file_path.rename(desired_path)
+                file_path = desired_path
+            except OSError:
+                pass
         await upload_path_to_telegram(
             bot_client, user_client, link["tg_user_id"], file_path, None
         )
