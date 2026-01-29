@@ -443,6 +443,33 @@ def generate_auto_uid() -> str:
     return uuid.uuid4().hex[:AUTO_UID_LENGTH]
 
 
+def format_username(username: str | None, fallback_id: int | None) -> str:
+    if username:
+        return username if username.startswith("@") else f"@{username}"
+    return str(fallback_id) if fallback_id is not None else "unknown"
+
+
+async def format_telegram_user(
+    client: TelegramClient, user_id: int | None
+) -> str:
+    if user_id is None:
+        return "unknown"
+    try:
+        entity = await client.get_entity(user_id)
+    except Exception:
+        return str(user_id)
+    username = getattr(entity, "username", None)
+    return format_username(username, user_id)
+
+
+def format_bale_user(sender: dict | None, fallback_id: int | None) -> str:
+    if sender:
+        username = sender.get("username") or sender.get("user_name")
+        if username:
+            return format_username(username, fallback_id)
+    return str(fallback_id) if fallback_id is not None else "unknown"
+
+
 async def upload_with_progress(
     user_client: TelegramClient,
     target: object,
@@ -1634,7 +1661,9 @@ async def poll_bale_updates(
                         await handle_auto_disable_bale(api, chat_id, sender_id)
                         continue
                     if auto_cmd == "set":
-                        await handle_auto_set_bale(api, chat_id, sender_id, auto_arg)
+                        await handle_auto_set_bale(
+                            api, bot_client, chat_id, sender_id, auto_arg, sender
+                        )
                         continue
                     await api.send_message(
                         chat_id, "Usage: /auto enable | /auto disable | /auto set <UID>"
@@ -1824,7 +1853,9 @@ async def handle_auto_enable_bale(
 
 
 async def handle_auto_set_telegram(
-    event: events.NewMessage.Event, uid: str | None
+    bot_client: TelegramClient,
+    event: events.NewMessage.Event,
+    uid: str | None,
 ) -> None:
     if not uid:
         await event.reply("Usage: /auto set <UID>")
@@ -1859,13 +1890,20 @@ async def handle_auto_set_telegram(
         return
     await db_set_auto_link(uid, event.sender_id, bale_user_id)
     await db_delete_auto_pending_by_uid(uid)
+    tg_name = await format_telegram_user(bot_client, event.sender_id)
+    bale_name = format_bale_user(None, bale_user_id)
     await event.reply(
-        f"Auto forwarding enabled.\nTelegram user: {event.sender_id}\nBale user: {bale_user_id}"
+        f"Auto forwarding enabled.\nTelegram user: {tg_name}\nBale user: {bale_name}"
     )
 
 
 async def handle_auto_set_bale(
-    api: BaleApi, chat_id: int, bale_user_id: int, uid: str | None
+    api: BaleApi,
+    bot_client: TelegramClient,
+    chat_id: int,
+    bale_user_id: int,
+    uid: str | None,
+    sender: dict | None,
 ) -> None:
     if not uid:
         await api.send_message(chat_id, "Usage: /auto set <UID>")
@@ -1897,9 +1935,11 @@ async def handle_auto_set_bale(
         return
     await db_set_auto_link(uid, tg_user_id, bale_user_id)
     await db_delete_auto_pending_by_uid(uid)
+    tg_name = await format_telegram_user(bot_client, tg_user_id)
+    bale_name = format_bale_user(sender, bale_user_id)
     await api.send_message(
         chat_id,
-        f"Auto forwarding enabled.\nTelegram user: {tg_user_id}\nBale user: {bale_user_id}",
+        f"Auto forwarding enabled.\nTelegram user: {tg_name}\nBale user: {bale_name}",
     )
 
 
@@ -1922,6 +1962,7 @@ async def handle_auto_disable_bale(
 
 async def forward_telegram_file_to_bale(
     bot_client: TelegramClient,
+    user_client: TelegramClient,
     api: BaleApi,
     event: events.NewMessage.Event,
     bale_user_id: int,
@@ -1930,9 +1971,10 @@ async def forward_telegram_file_to_bale(
         return
     sender_id = event.sender_id
     if sender_id is not None:
+        tg_name = await format_telegram_user(user_client, sender_id)
         await event.reply("Forwarding your file to Bale...")
         await api.send_message(
-            bale_user_id, f"Incoming file from Telegram user {sender_id}."
+            bale_user_id, f"Incoming file from Telegram user {tg_name}."
         )
     temp_dir = make_temp_dir("telegram-auto")
     try:
@@ -1961,9 +2003,10 @@ async def forward_bale_file_to_telegram(
     link = await db_get_auto_link_by_bale(bale_user_id)
     if not link:
         return
+    bale_name = format_bale_user(message.get("from") or {}, bale_user_id)
     await api.send_message(bale_user_id, "Forwarding your file to Telegram...")
     await user_client.send_message(
-        link["tg_user_id"], f"Incoming file from Bale user {bale_user_id}."
+        link["tg_user_id"], f"Incoming file from Bale user {bale_name}."
     )
     temp_dir = make_temp_dir("bale-auto")
     try:
@@ -2072,7 +2115,7 @@ async def main() -> None:
                 await handle_auto_disable_telegram(event)
                 return
             if auto_cmd == "set":
-                await handle_auto_set_telegram(event, auto_arg)
+                await handle_auto_set_telegram(bot_client, event, auto_arg)
                 return
             await event.reply("Usage: /auto enable | /auto disable | /auto set <UID>")
             return
@@ -2095,7 +2138,11 @@ async def main() -> None:
                 if link:
                     _spawn_bale_task(
                         forward_telegram_file_to_bale(
-                            bot_client, bale_api, event, link["bale_user_id"]
+                            bot_client,
+                            user_client,
+                            bale_api,
+                            event,
+                            link["bale_user_id"],
                         ),
                         "auto-telegram-to-bale",
                     )
