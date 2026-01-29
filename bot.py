@@ -462,6 +462,19 @@ async def format_telegram_user(
     return format_username(username, user_id)
 
 
+async def format_telegram_sender(
+    event: events.NewMessage.Event,
+) -> str:
+    sender = event.sender
+    if sender is None:
+        try:
+            sender = await event.get_sender()
+        except Exception:
+            sender = None
+    username = getattr(sender, "username", None) if sender else None
+    return format_username(username, event.sender_id)
+
+
 def format_bale_user(sender: dict | None, fallback_id: int | None) -> str:
     if sender:
         username = sender.get("username") or sender.get("user_name")
@@ -1890,7 +1903,7 @@ async def handle_auto_set_telegram(
         return
     await db_set_auto_link(uid, event.sender_id, bale_user_id)
     await db_delete_auto_pending_by_uid(uid)
-    tg_name = await format_telegram_user(bot_client, event.sender_id)
+    tg_name = await format_telegram_sender(event)
     bale_name = format_bale_user(None, bale_user_id)
     await event.reply(
         f"Auto forwarding enabled.\nTelegram user: {tg_name}\nBale user: {bale_name}"
@@ -1971,7 +1984,7 @@ async def forward_telegram_file_to_bale(
         return
     sender_id = event.sender_id
     if sender_id is not None:
-        tg_name = await format_telegram_user(user_client, sender_id)
+        tg_name = await format_telegram_sender(event)
         await event.reply("Forwarding your file to Bale...")
         await api.send_message(
             bale_user_id, f"Incoming file from Telegram user {tg_name}."
@@ -2005,9 +2018,12 @@ async def forward_bale_file_to_telegram(
         return
     bale_name = format_bale_user(message.get("from") or {}, bale_user_id)
     await api.send_message(bale_user_id, "Forwarding your file to Telegram...")
-    await user_client.send_message(
-        link["tg_user_id"], f"Incoming file from Bale user {bale_name}."
-    )
+    try:
+        await bot_client.send_message(
+            link["tg_user_id"], f"Incoming file from Bale user {bale_name}."
+        )
+    except Exception as exc:
+        logger.warning("Auto forward notify failed: %s", exc)
     temp_dir = make_temp_dir("bale-auto")
     try:
         file_path = await download_bale_media(api, file_id, temp_dir)
