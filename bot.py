@@ -502,6 +502,16 @@ def format_bale_user(sender: dict | None, fallback_id: int | None) -> str:
     return str(fallback_id) if fallback_id is not None else "unknown"
 
 
+async def get_telegram_entity(
+    client: TelegramClient, user_id: int
+) -> object | None:
+    try:
+        return await client.get_input_entity(user_id)
+    except Exception as exc:
+        logger.warning("Telegram entity lookup failed user_id=%s err=%s", user_id, exc)
+        return None
+
+
 async def upload_with_progress(
     user_client: TelegramClient,
     target: object,
@@ -2019,7 +2029,7 @@ async def forward_telegram_file_to_bale(
         return
     sender_id = event.sender_id
     if sender_id is not None:
-        tg_name = await format_telegram_user(user_client, sender_id)
+        tg_name = await format_telegram_user(bot_client, sender_id)
         await event.reply("Forwarding your file to Bale...")
         await api.send_message(
             bale_user_id, f"Incoming file from Telegram user {tg_name}."
@@ -2060,9 +2070,15 @@ async def forward_bale_file_to_telegram(
         return
     bale_name = format_bale_user(message.get("from") or {}, bale_user_id)
     await api.send_message(bale_user_id, "Forwarding your file to Telegram...")
-    await user_client.send_message(
-        link["tg_user_id"], f"Incoming file from Bale user {bale_name}."
-    )
+    tg_entity = await get_telegram_entity(bot_client, link["tg_user_id"])
+    if tg_entity is None:
+        return
+    try:
+        await bot_client.send_message(
+            tg_entity, f"Incoming file from Bale user {bale_name}."
+        )
+    except Exception as exc:
+        logger.warning("Auto forward notify failed: %s", exc)
     temp_dir = make_temp_dir("bale-auto")
     try:
         file_path = await download_bale_media(api, file_id, temp_dir)
@@ -2079,11 +2095,9 @@ async def forward_bale_file_to_telegram(
                     file_path = desired_path
                 except OSError:
                     pass
-            await user_client.send_file(
-                link["tg_user_id"], file_path, force_document=True
-            )
+            await bot_client.send_file(tg_entity, file_path, force_document=True)
             return
-        await user_client.send_file(link["tg_user_id"], file_path)
+        await bot_client.send_file(tg_entity, file_path)
     finally:
         if temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
