@@ -34,8 +34,8 @@ DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", "downloads"))
 DB_PATH = Path(os.environ.get("HASH_DB_PATH", "hash_cache.db"))
 BALE_BOT_TOKEN = os.environ.get("BALE_BOT_TOKEN")
 BALE_API_URL = os.environ.get("BALE_API_URL", "https://tapi.bale.ai")
-BALE_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
-BALE_ZIP_PART_BYTES = 17 * 1024 * 1024
+BALE_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+BALE_ZIP_PART_BYTES = 40 * 1024 * 1024
 BALE_UPLOAD_TIMEOUT_SECONDS = int(os.environ.get("BALE_UPLOAD_TIMEOUT_SECONDS", "1800"))
 
 MAX_CONCURRENT_DOWNLOADS = 10
