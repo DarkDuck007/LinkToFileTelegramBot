@@ -1210,6 +1210,8 @@ async def process_job(
                 url_name = apply_html_extension(url_name, content_type)
                 header_name = apply_html_extension(header_name, content_type)
                 target_name = url_name or header_name or "untitled"
+                if len(target_name)>64:
+                    target_name = str(uuid.uuid4())
                 target_path = job_dir / target_name
                 if target_path.exists():
                     stem = target_path.stem or "download"
