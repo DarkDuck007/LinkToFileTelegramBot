@@ -701,6 +701,50 @@ async def mod_find_block_for_hash(file_hash: str) -> dict | None:
     return {"type": row[0], "value": row[1], "reason": row[2], "action": row[3]} if row else None
 
 
+async def mod_list_blocks(kind: str | None = None, limit: int = 50) -> list[dict]:
+    if mod_db_conn is None:
+        return []
+    if kind and kind not in {"hash", "link", "domain"}:
+        return []
+    async with mod_db_lock:
+        if kind:
+            cursor = mod_db_conn.execute(
+                "SELECT type, value, reason, created_at, created_by, action "
+                "FROM content_blocklist WHERE type = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (kind, limit),
+            )
+        else:
+            cursor = mod_db_conn.execute(
+                "SELECT type, value, reason, created_at, created_by, action "
+                "FROM content_blocklist ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+        rows = cursor.fetchall()
+    return [
+        {
+            "type": row[0],
+            "value": row[1],
+            "reason": row[2],
+            "created_at": row[3],
+            "created_by": row[4],
+            "action": row[5],
+        }
+        for row in rows
+    ]
+
+
+def format_block_rows(rows: list[dict]) -> str:
+    if not rows:
+        return "No blocklist entries."
+    lines = []
+    for row in rows:
+        reason = row.get("reason") or "-"
+        created_at = row.get("created_at") or "-"
+        lines.append(f"{row['type']} | {row['value']} | {reason} | {created_at}")
+    return "\n".join(lines)
+
+
 async def mod_log_abuse(
     user: UserRef,
     link: str | None,
@@ -2553,6 +2597,12 @@ async def handle_admin_command(
         normalized = normalize_block_value(kind, parts[3])
         await mod_remove_block(kind, parts[3])
         return f"Unblocked {kind}: {normalized}"
+    if cmd in {"blocks", "blocklist"}:
+        kind = parts[2].lower() if len(parts) >= 3 else None
+        if kind is not None and kind not in {"hash", "link", "domain"}:
+            return "Usage: /admin blocks [hash|link|domain]"
+        rows = await mod_list_blocks(kind, limit=50)
+        return format_block_rows(rows)
     if cmd == "quarantine":
         if len(parts) >= 4 and parts[2].lower() in {"approve", "reject"}:
             status = "approved" if parts[2].lower() == "approve" else "rejected"
@@ -2597,8 +2647,8 @@ async def handle_admin_command(
             await mod_ban_user(platform, user_id, reason, admin_platform, admin_user_id)
         return f"Banned {len(seen)} users for hash {parts[2]}."
     return (
-        "Admin commands: ban, unban, baninfo, search, block, unblock, quarantine, "
-        "broadcast, appeals, keys, keydel, banhash."
+        "Admin commands: ban, unban, baninfo, search, block, unblock, blocks, "
+        "quarantine, broadcast, appeals, keys, keydel, banhash."
     )
 
 

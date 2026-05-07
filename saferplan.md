@@ -116,6 +116,7 @@ Telegram admin commands:
 - `/admin block link <url-or-wildcard> [reason]`, for example `https://somebadsite.com*` or `https://*.somebadsite.com*`
 - `/admin block domain <domain> [reason]`
 - `/admin unblock <hash|link|domain> <value>`
+- `/admin blocks [hash|link|domain]`
 - `/admin quarantine list`
 - `/admin quarantine approve <id>`
 - `/admin quarantine reject <id>`
