@@ -2310,7 +2310,7 @@ async def poll_bale_updates(
                 await mod_register_user(bale_user)
                 if text.lower().startswith("/admin"):
                     if not is_bale_admin(sender_id):
-                        await api.send_message(chat_id, "Admin access required.")
+                        await api.send_message(chat_id, "Admin access denied.")
                         continue
                     try:
                         await api.send_message(
@@ -3239,7 +3239,7 @@ async def main() -> None:
         await mod_register_user(tg_user)
         if text.lower().startswith("/admin"):
             if not is_telegram_admin(event.sender_id):
-                await event.reply("Admin access required.")
+                await event.reply("Admin access denied.")
                 return
             try:
                 await event.reply(await handle_admin_command(text, "telegram", event.sender_id))
