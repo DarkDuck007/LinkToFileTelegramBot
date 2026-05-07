@@ -1,0 +1,42 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local bot runtime data
+downloads/
+dev_downloads/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.session
+*.session-journal
+
+# Logs and temporary files
+*.log
+*.tmp
+tmp/
+temp/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
