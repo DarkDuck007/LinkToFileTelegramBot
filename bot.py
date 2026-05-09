@@ -70,19 +70,20 @@ from config import (
     USER_PHONE,
 )
 from download_utils import (
-    apply_html_extension,
+    choose_download_filename,
     compute_sha256,
     create_zip,
     download_with_progress,
+    improve_filename_from_file,
     make_hash_caption,
     probe_response_meta,
+    shorten_filename,
     should_zip,
     split_file,
 )
 from models import Job, UserRef
 from safety import (
     ascii_filename,
-    filename_from_url,
     resolve_safe_download_url,
     sanitize_filename,
     validate_public_http_url,
@@ -1755,13 +1756,11 @@ async def process_job(
                 if rc != 0:
                     await editor.update("Download failed.", force=True)
                     return
-                url_name = filename_from_url(safe_url)
-                header_name = sanitize_filename(header_name) if header_name else ""
-                url_name = apply_html_extension(url_name, content_type)
-                header_name = apply_html_extension(header_name, content_type)
-                target_name = url_name or header_name or "untitled"
-                if len(target_name)>64:
-                    target_name = str(uuid.uuid4())
+                target_name = choose_download_filename(
+                    safe_url, header_name, content_type
+                )
+                target_name = improve_filename_from_file(target_name, output_path)
+                target_name = shorten_filename(target_name)
                 target_path = job_dir / target_name
                 if target_path.exists():
                     stem = target_path.stem or "download"
@@ -1895,11 +1894,11 @@ async def process_bale_link(
                 if rc != 0:
                     await editor.update("Download failed.", force=True)
                     return
-                url_name = filename_from_url(safe_url)
-                header_name = sanitize_filename(header_name) if header_name else ""
-                url_name = apply_html_extension(url_name, content_type)
-                header_name = apply_html_extension(header_name, content_type)
-                target_name = url_name or header_name or "untitled"
+                target_name = choose_download_filename(
+                    safe_url, header_name, content_type
+                )
+                target_name = improve_filename_from_file(target_name, output_path)
+                target_name = shorten_filename(target_name)
                 target_path = job_dir / target_name
                 if target_path.exists():
                     stem = target_path.stem or "download"
