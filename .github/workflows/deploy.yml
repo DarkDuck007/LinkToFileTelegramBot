@@ -100,11 +100,11 @@ jobs:
           SFTP_PATH="${{ secrets.SFTP_PATH }}"
 
           echo "[sftp] Resolving Docker volume mount point..."
-          DATA_DIR=$(docker volume inspect linktofile_bot-data --format '{{ .Mountpoint }}' 2>/dev/null || true)
+          DATA_DIR=$(sudo docker volume inspect linktofile_bot-data --format '{{ .Mountpoint }}' 2>/dev/null || true)
           if [ -z "$DATA_DIR" ]; then
             echo "[sftp] Creating Docker volume linktofile_bot-data..."
-            docker volume create linktofile_bot-data
-            DATA_DIR=$(docker volume inspect linktofile_bot-data --format '{{ .Mountpoint }}')
+            sudo docker volume create linktofile_bot-data
+            DATA_DIR=$(sudo docker volume inspect linktofile_bot-data --format '{{ .Mountpoint }}')
           fi
           echo "[sftp] Data directory: $DATA_DIR"
 
@@ -135,15 +135,15 @@ jobs:
           cd "$DEPLOY_PATH"
           echo "[deploy] Working directory: $(pwd)"
           echo "[deploy] Stopping existing containers..."
-          docker compose down --timeout 30 || true
+          sudo docker compose down --timeout 30 || true
           echo "[deploy] Building and starting containers..."
-          docker compose up -d --build --remove-orphans
+          sudo docker compose up -d --build --remove-orphans
           echo "[deploy] Waiting for container to start..."
           sleep 5
           echo "[deploy] Container status:"
-          docker compose ps
+          sudo docker compose ps
           echo "[deploy] Recent logs:"
-          docker compose logs --tail=20
+          sudo docker compose logs --tail=20
           DEPLOYEOF
           echo "::endgroup::"
 
