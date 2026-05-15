@@ -71,7 +71,7 @@ async def probe_response_meta(url: str) -> tuple[str | None, str | None, int | N
         "wget",
         "--server-response",
         "--spider",
-        "--max-redirect=0",
+        "--max-redirect=20",
         "--timeout=10",
         "--tries=2",
         "--",
@@ -167,13 +167,17 @@ def filename_from_query(url: str) -> str:
 
 
 def choose_download_filename(
-    url: str, header_name: str | None, content_type: str | None
+    url: str, header_name: str | None, content_type: str | None,
+    original_url: str | None = None,
 ) -> str:
     names = [
         sanitize_filename(header_name) if header_name else "",
         filename_from_query(url),
         filename_from_url(url),
     ]
+    if original_url and original_url != url:
+        names.insert(2, filename_from_query(original_url))
+        names.insert(3, filename_from_url(original_url))
     for name in names:
         if name and Path(name).suffix:
             return name
@@ -245,7 +249,7 @@ async def download_with_progress(
         "--tries=2",
         "-O",
         str(output_path),
-        "--max-redirect=0",
+        "--max-redirect=20",
         "--",
         url,
         stdout=asyncio.subprocess.DEVNULL,

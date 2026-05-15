@@ -1757,7 +1757,8 @@ async def process_job(
                     await editor.update("Download failed.", force=True)
                     return
                 target_name = choose_download_filename(
-                    safe_url, header_name, content_type
+                    safe_url, header_name, content_type,
+                    original_url=job.url,
                 )
                 target_name = improve_filename_from_file(target_name, output_path)
                 target_name = shorten_filename(target_name)
@@ -1895,7 +1896,8 @@ async def process_bale_link(
                     await editor.update("Download failed.", force=True)
                     return
                 target_name = choose_download_filename(
-                    safe_url, header_name, content_type
+                    safe_url, header_name, content_type,
+                    original_url=url,
                 )
                 target_name = improve_filename_from_file(target_name, output_path)
                 target_name = shorten_filename(target_name)
