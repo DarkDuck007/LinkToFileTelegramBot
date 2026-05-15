@@ -23,20 +23,21 @@ jobs:
 
       - name: Pull latest code on VPS
         run: |
-          ssh -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
+          ssh -T -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
             ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'PULLEOF'
           set -e
+          mkdir -p "$(dirname '${{ secrets.DEPLOY_PATH }}')"
           if [ ! -d "${{ secrets.DEPLOY_PATH }}/.git" ]; then
-            git clone https://github.com/${{ github.repository }}.git ${{ secrets.DEPLOY_PATH }}
+            git clone https://github.com/${{ github.repository }}.git "${{ secrets.DEPLOY_PATH }}"
           fi
-          cd ${{ secrets.DEPLOY_PATH }}
+          cd "${{ secrets.DEPLOY_PATH }}"
           git fetch origin main
           git reset --hard origin/main
           PULLEOF
 
       - name: Write .env file on VPS
         run: |
-          ssh -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
+          ssh -T -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
             ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'ENVEOF'
           cat > ${{ secrets.DEPLOY_PATH }}/.env << 'EOF'
           TELETHON_API_ID=${{ secrets.TELETHON_API_ID }}
@@ -64,7 +65,7 @@ jobs:
       - name: SFTP bootstrap (pull session/db files)
         if: env.SFTP_PULL_DATA == 'true'
         run: |
-          ssh -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
+          ssh -T -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
             ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'SFTPEOF'
           set -e
 
@@ -76,17 +77,14 @@ jobs:
           # Resolve the Docker named volume mount point
           DATA_DIR=$(docker volume inspect linktofile_bot-data --format '{{ .Mountpoint }}' 2>/dev/null || true)
           if [ -z "$DATA_DIR" ]; then
-            # Volume doesn't exist yet; create it and get the path
             docker volume create linktofile_bot-data
             DATA_DIR=$(docker volume inspect linktofile_bot-data --format '{{ .Mountpoint }}')
           fi
 
           echo "Pulling session/db files from SFTP source into $DATA_DIR ..."
 
-          # Install sshpass if not present
           which sshpass > /dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq sshpass)
 
-          # Pull *.session and *.db files
           export SSHPASS='${{ secrets.SFTP_PASSWORD }}'
           sshpass -e scp -P "$SFTP_PORT" -o StrictHostKeyChecking=no \
             "${SFTP_USER}@${SFTP_HOST}:${SFTP_PATH}/*.session" "$DATA_DIR/" 2>/dev/null || echo "No .session files found on SFTP source"
@@ -98,9 +96,10 @@ jobs:
 
       - name: Build and deploy container
         run: |
-          ssh -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
+          ssh -T -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
             ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'DEPLOYEOF'
-          cd ${{ secrets.DEPLOY_PATH }}
+          set -e
+          cd "${{ secrets.DEPLOY_PATH }}"
           docker compose down --timeout 30 || true
           docker compose up -d --build --remove-orphans
           echo "Waiting for container to start..."
