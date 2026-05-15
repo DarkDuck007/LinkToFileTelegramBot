@@ -113,15 +113,15 @@ jobs:
 
           echo "[sftp] Pulling *.session files from $SFTP_HOST:$SFTP_PATH ..."
           export SSHPASS='${{ secrets.SFTP_PASSWORD }}'
-          sshpass -e scp -P "$SFTP_PORT" -o StrictHostKeyChecking=no \
+          sudo -E sshpass -e scp -P "$SFTP_PORT" -o StrictHostKeyChecking=no \
             "${SFTP_USER}@${SFTP_HOST}:${SFTP_PATH}/*.session" "$DATA_DIR/" 2>/dev/null || echo "[sftp] No .session files found"
 
           echo "[sftp] Pulling *.db files from $SFTP_HOST:$SFTP_PATH ..."
-          sshpass -e scp -P "$SFTP_PORT" -o StrictHostKeyChecking=no \
+          sudo -E sshpass -e scp -P "$SFTP_PORT" -o StrictHostKeyChecking=no \
             "${SFTP_USER}@${SFTP_HOST}:${SFTP_PATH}/*.db" "$DATA_DIR/" 2>/dev/null || echo "[sftp] No .db files found"
 
           echo "[sftp] Bootstrap complete. Files in $DATA_DIR:"
-          ls -la "$DATA_DIR/"
+          sudo ls -la "$DATA_DIR/"
           SFTPEOF
           echo "::endgroup::"
 
