@@ -98,30 +98,39 @@ jobs:
           SFTP_HOST="${{ secrets.SFTP_HOST }}"
           SFTP_USER="${{ secrets.SFTP_USER }}"
           SFTP_PATH="${{ secrets.SFTP_PATH }}"
+          STAGING_DIR=$(mktemp -d)
 
-          echo "[sftp] Resolving Docker volume mount point..."
-          DATA_DIR=$(docker volume inspect linktofile_bot-data --format '{{ .Mountpoint }}' 2>/dev/null || true)
-          if [ -z "$DATA_DIR" ]; then
-            echo "[sftp] Creating Docker volume linktofile_bot-data..."
-            docker volume create linktofile_bot-data
-            DATA_DIR=$(docker volume inspect linktofile_bot-data --format '{{ .Mountpoint }}')
+          if ! command -v sshpass &>/dev/null; then
+            echo "[sftp] ERROR: sshpass is not installed. Run: sudo apt-get install -y sshpass"
+            exit 1
           fi
-          echo "[sftp] Data directory: $DATA_DIR"
 
-          echo "[sftp] Installing sshpass if needed..."
-          which sshpass > /dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq sshpass)
+          echo "[sftp] Ensuring Docker volume exists..."
+          docker volume inspect linktofile_bot-data &>/dev/null || docker volume create linktofile_bot-data
 
-          echo "[sftp] Pulling *.session files from $SFTP_HOST:$SFTP_PATH ..."
+          echo "[sftp] Pulling files from ${SFTP_HOST}:${SFTP_PATH} to staging..."
           export SSHPASS='${{ secrets.SFTP_PASSWORD }}'
           sshpass -e scp -P "$SFTP_PORT" -o StrictHostKeyChecking=no \
-            "${SFTP_USER}@${SFTP_HOST}:${SFTP_PATH}/*.session" "$DATA_DIR/" 2>/dev/null || echo "[sftp] No .session files found"
-
-          echo "[sftp] Pulling *.db files from $SFTP_HOST:$SFTP_PATH ..."
+            "${SFTP_USER}@${SFTP_HOST}:${SFTP_PATH}/*.session" "$STAGING_DIR/" 2>/dev/null || echo "[sftp] No .session files found"
           sshpass -e scp -P "$SFTP_PORT" -o StrictHostKeyChecking=no \
-            "${SFTP_USER}@${SFTP_HOST}:${SFTP_PATH}/*.db" "$DATA_DIR/" 2>/dev/null || echo "[sftp] No .db files found"
+            "${SFTP_USER}@${SFTP_HOST}:${SFTP_PATH}/*.db" "$STAGING_DIR/" 2>/dev/null || echo "[sftp] No .db files found"
 
-          echo "[sftp] Bootstrap complete. Files in $DATA_DIR:"
-          ls -la "$DATA_DIR/"
+          echo "[sftp] Staging dir contents:"
+          ls -la "$STAGING_DIR/"
+
+          FILE_COUNT=$(find "$STAGING_DIR" -maxdepth 1 -type f | wc -l)
+          if [ "$FILE_COUNT" -gt 0 ]; then
+            echo "[sftp] Copying $FILE_COUNT file(s) into Docker volume via container..."
+            docker run --rm \
+              -v linktofile_bot-data:/data \
+              -v "$STAGING_DIR":/src:ro \
+              alpine sh -c 'cp /src/* /data/ && ls -la /data/'
+          else
+            echo "[sftp] No files to copy, skipping."
+          fi
+
+          rm -rf "$STAGING_DIR"
+          echo "[sftp] Bootstrap complete."
           SFTPEOF
           echo "::endgroup::"
 
