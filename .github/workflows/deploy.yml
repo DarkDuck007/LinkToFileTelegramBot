@@ -16,31 +16,51 @@ jobs:
 
       - name: Configure SSH
         run: |
+          echo "::group::Setting up SSH keys"
           mkdir -p ~/.ssh
           echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -p ${{ secrets.VPS_SSH_PORT || 22 }} ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          echo "SSH key configured"
+          echo "::endgroup::"
 
       - name: Pull latest code on VPS
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          echo "::group::Syncing repository on VPS"
           ssh -T -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
-            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'PULLEOF'
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "REPO_URL='https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git' DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}' bash -s" << 'PULLEOF'
           set -e
-          mkdir -p "${{ secrets.DEPLOY_PATH }}"
-          cd "${{ secrets.DEPLOY_PATH }}"
+          echo "[pull] Target directory: $DEPLOY_PATH"
+          mkdir -p "$DEPLOY_PATH"
+          cd "$DEPLOY_PATH"
           if [ ! -d ".git" ]; then
-            git init
-            git remote add origin https://github.com/${{ github.repository }}.git
+            echo "[pull] Initializing new git repo..."
+            git init -b main
+            git remote add origin "$REPO_URL"
+          else
+            echo "[pull] Git repo already exists, updating remote URL..."
+            git remote set-url origin "$REPO_URL"
           fi
+          echo "[pull] Fetching latest code from origin/main..."
           git fetch origin main
+          echo "[pull] Resetting to origin/main..."
           git reset --hard origin/main
+          echo "[pull] Current HEAD: $(git log --oneline -1)"
+          echo "[pull] Done."
           PULLEOF
+          echo "::endgroup::"
 
       - name: Write .env file on VPS
         run: |
+          echo "::group::Writing .env configuration"
           ssh -T -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
-            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'ENVEOF'
-          cat > ${{ secrets.DEPLOY_PATH }}/.env << 'EOF'
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}' bash -s" << 'ENVEOF'
+          set -e
+          cat > "$DEPLOY_PATH/.env" << 'EOF'
           TELETHON_API_ID=${{ secrets.TELETHON_API_ID }}
           TELETHON_API_HASH=${{ secrets.TELETHON_API_HASH }}
           TELETHON_BOT_TOKEN=${{ secrets.TELETHON_BOT_TOKEN }}
@@ -61,13 +81,17 @@ jobs:
           TELETHON_SESSION=/data/userbot
           TELETHON_BOT_SESSION=/data/bot
           EOF
+          echo "[env] .env written to $DEPLOY_PATH/.env"
           ENVEOF
+          echo "::endgroup::"
 
       - name: SFTP bootstrap (pull session/db files)
         if: env.SFTP_PULL_DATA == 'true'
         run: |
+          echo "::group::SFTP data bootstrap"
           ssh -T -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
-            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'SFTPEOF'
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}' bash -s" << 'SFTPEOF'
           set -e
 
           SFTP_PORT="${{ secrets.SFTP_PORT || 22 }}"
@@ -75,39 +99,53 @@ jobs:
           SFTP_USER="${{ secrets.SFTP_USER }}"
           SFTP_PATH="${{ secrets.SFTP_PATH }}"
 
-          # Resolve the Docker named volume mount point
+          echo "[sftp] Resolving Docker volume mount point..."
           DATA_DIR=$(docker volume inspect linktofile_bot-data --format '{{ .Mountpoint }}' 2>/dev/null || true)
           if [ -z "$DATA_DIR" ]; then
+            echo "[sftp] Creating Docker volume linktofile_bot-data..."
             docker volume create linktofile_bot-data
             DATA_DIR=$(docker volume inspect linktofile_bot-data --format '{{ .Mountpoint }}')
           fi
+          echo "[sftp] Data directory: $DATA_DIR"
 
-          echo "Pulling session/db files from SFTP source into $DATA_DIR ..."
-
+          echo "[sftp] Installing sshpass if needed..."
           which sshpass > /dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq sshpass)
 
+          echo "[sftp] Pulling *.session files from $SFTP_HOST:$SFTP_PATH ..."
           export SSHPASS='${{ secrets.SFTP_PASSWORD }}'
           sshpass -e scp -P "$SFTP_PORT" -o StrictHostKeyChecking=no \
-            "${SFTP_USER}@${SFTP_HOST}:${SFTP_PATH}/*.session" "$DATA_DIR/" 2>/dev/null || echo "No .session files found on SFTP source"
-          sshpass -e scp -P "$SFTP_PORT" -o StrictHostKeyChecking=no \
-            "${SFTP_USER}@${SFTP_HOST}:${SFTP_PATH}/*.db" "$DATA_DIR/" 2>/dev/null || echo "No .db files found on SFTP source"
+            "${SFTP_USER}@${SFTP_HOST}:${SFTP_PATH}/*.session" "$DATA_DIR/" 2>/dev/null || echo "[sftp] No .session files found"
 
-          echo "SFTP bootstrap complete."
+          echo "[sftp] Pulling *.db files from $SFTP_HOST:$SFTP_PATH ..."
+          sshpass -e scp -P "$SFTP_PORT" -o StrictHostKeyChecking=no \
+            "${SFTP_USER}@${SFTP_HOST}:${SFTP_PATH}/*.db" "$DATA_DIR/" 2>/dev/null || echo "[sftp] No .db files found"
+
+          echo "[sftp] Bootstrap complete. Files in $DATA_DIR:"
+          ls -la "$DATA_DIR/"
           SFTPEOF
+          echo "::endgroup::"
 
       - name: Build and deploy container
         run: |
+          echo "::group::Building and starting container"
           ssh -T -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
-            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'DEPLOYEOF'
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}' bash -s" << 'DEPLOYEOF'
           set -e
-          cd "${{ secrets.DEPLOY_PATH }}"
+          cd "$DEPLOY_PATH"
+          echo "[deploy] Working directory: $(pwd)"
+          echo "[deploy] Stopping existing containers..."
           docker compose down --timeout 30 || true
+          echo "[deploy] Building and starting containers..."
           docker compose up -d --build --remove-orphans
-          echo "Waiting for container to start..."
+          echo "[deploy] Waiting for container to start..."
           sleep 5
+          echo "[deploy] Container status:"
           docker compose ps
+          echo "[deploy] Recent logs:"
           docker compose logs --tail=20
           DEPLOYEOF
+          echo "::endgroup::"
 
       - name: Cleanup SSH key
         if: always()
