@@ -7,6 +7,8 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      SFTP_PULL_DATA: ${{ secrets.SFTP_PULL_DATA }}
 
     steps:
       - name: Checkout code
@@ -65,7 +67,7 @@ jobs:
           ENVEOF
 
       - name: SFTP bootstrap (pull session/db files)
-        if: ${{ secrets.SFTP_PULL_DATA == 'true' }}
+        if: env.SFTP_PULL_DATA == 'true'
         run: |
           ssh -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
             ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'SFTPEOF'
