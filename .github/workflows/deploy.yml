@@ -1,0 +1,117 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p ${{ secrets.VPS_SSH_PORT || 22 }} ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Sync code to VPS
+        run: |
+          rsync -avz --delete \
+            --exclude='.git' \
+            --exclude='.env' \
+            --exclude='*.session' \
+            --exclude='*.session-journal' \
+            --exclude='*.db' \
+            --exclude='*.db-shm' \
+            --exclude='*.db-wal' \
+            --exclude='downloads/' \
+            --exclude='dev_downloads/' \
+            --exclude='.venv/' \
+            --exclude='__pycache__/' \
+            --exclude='old_db/' \
+            -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }}" \
+            ./ ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ secrets.DEPLOY_PATH }}/
+
+      - name: Write .env file on VPS
+        run: |
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'ENVEOF'
+          cat > ${{ secrets.DEPLOY_PATH }}/.env << 'EOF'
+          TELETHON_API_ID=${{ secrets.TELETHON_API_ID }}
+          TELETHON_API_HASH=${{ secrets.TELETHON_API_HASH }}
+          TELETHON_BOT_TOKEN=${{ secrets.TELETHON_BOT_TOKEN }}
+          TELETHON_PHONE=${{ secrets.TELETHON_PHONE }}
+          TELETHON_PASSWORD=${{ secrets.TELETHON_PASSWORD }}
+          TELETHON_BOT_USERNAME=${{ secrets.TELETHON_BOT_USERNAME }}
+          BOT_API_URL=${{ secrets.BOT_API_URL || 'https://api.telegram.org' }}
+          BALE_BOT_TOKEN=${{ secrets.BALE_BOT_TOKEN }}
+          BALE_API_URL=${{ secrets.BALE_API_URL || 'https://tapi.bale.ai' }}
+          ADMIN_TELEGRAM_IDS=${{ secrets.ADMIN_TELEGRAM_IDS }}
+          ADMIN_BALE_IDS=${{ secrets.ADMIN_BALE_IDS }}
+          ADMIN_REST_TOKEN=${{ secrets.ADMIN_REST_TOKEN }}
+          ADMIN_REST_HOST=0.0.0.0
+          ADMIN_REST_PORT=8080
+          DOWNLOAD_DIR=/data/downloads
+          HASH_DB_PATH=/data/hash_cache.db
+          MODERATION_DB_PATH=/data/moderation.db
+          TELETHON_SESSION=/data/userbot
+          TELETHON_BOT_SESSION=/data/bot
+          EOF
+          ENVEOF
+
+      - name: SFTP bootstrap (pull session/db files)
+        if: ${{ secrets.SFTP_PULL_DATA == 'true' }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'SFTPEOF'
+          set -e
+
+          SFTP_PORT="${{ secrets.SFTP_PORT || 22 }}"
+          SFTP_HOST="${{ secrets.SFTP_HOST }}"
+          SFTP_USER="${{ secrets.SFTP_USER }}"
+          SFTP_PATH="${{ secrets.SFTP_PATH }}"
+
+          # Resolve the Docker named volume mount point
+          DATA_DIR=$(docker volume inspect linktofile_bot-data --format '{{ .Mountpoint }}' 2>/dev/null || true)
+          if [ -z "$DATA_DIR" ]; then
+            # Volume doesn't exist yet; create it and get the path
+            docker volume create linktofile_bot-data
+            DATA_DIR=$(docker volume inspect linktofile_bot-data --format '{{ .Mountpoint }}')
+          fi
+
+          echo "Pulling session/db files from SFTP source into $DATA_DIR ..."
+
+          # Install sshpass if not present
+          which sshpass > /dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq sshpass)
+
+          # Pull *.session and *.db files
+          export SSHPASS='${{ secrets.SFTP_PASSWORD }}'
+          sshpass -e scp -P "$SFTP_PORT" -o StrictHostKeyChecking=no \
+            "${SFTP_USER}@${SFTP_HOST}:${SFTP_PATH}/*.session" "$DATA_DIR/" 2>/dev/null || echo "No .session files found on SFTP source"
+          sshpass -e scp -P "$SFTP_PORT" -o StrictHostKeyChecking=no \
+            "${SFTP_USER}@${SFTP_HOST}:${SFTP_PATH}/*.db" "$DATA_DIR/" 2>/dev/null || echo "No .db files found on SFTP source"
+
+          echo "SFTP bootstrap complete."
+          SFTPEOF
+
+      - name: Build and deploy container
+        run: |
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.VPS_SSH_PORT || 22 }} \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'DEPLOYEOF'
+          cd ${{ secrets.DEPLOY_PATH }}
+          docker compose down --timeout 30 || true
+          docker compose up -d --build --remove-orphans
+          echo "Waiting for container to start..."
+          sleep 5
+          docker compose ps
+          docker compose logs --tail=20
+          DEPLOYEOF
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
