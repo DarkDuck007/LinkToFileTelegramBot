@@ -4,6 +4,7 @@ Example:
 
     TELETHON_API_ID=123 TELETHON_API_HASH=abc TELETHON_PHONE=+15551234567 \
       python generate_telethon_session.py --session /path/to/data/userbot
+      
 """
 
 from __future__ import annotations
