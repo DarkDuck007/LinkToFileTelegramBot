@@ -1,6 +1,7 @@
 # LinkToFile Userbot
 
 Telethon userbot that downloads a link with `wget` and uploads the file back to the sender.
+Works with Bale and Telegram
 
 ## Setup
 

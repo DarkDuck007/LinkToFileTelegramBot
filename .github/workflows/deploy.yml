@@ -124,7 +124,7 @@ jobs:
             docker run --rm \
               -v linktofile_bot-data:/data \
               -v "$STAGING_DIR":/src:ro \
-              alpine sh -c 'cp /src/* /data/ && ls -la /data/'
+              alpine sh -c 'cp /src/* /data/ && chown -R 999:999 /data/ && ls -la /data/'
           else
             echo "[sftp] No files to copy, skipping."
           fi
