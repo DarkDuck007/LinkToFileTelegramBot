@@ -1,17 +1,18 @@
 services:
   linktofile:
-    build: .
+    build:
+      context: .
+      args:
+        APP_UID: ${HOST_UID:-1000}
+        APP_GID: ${HOST_GID:-1000}
     container_name: linktofile-bot
     restart: unless-stopped
     env_file: .env
     volumes:
-      - bot-data:/data
+      - ${HOST_DATA_DIR:-./data}:/data
     environment:
       - DOWNLOAD_DIR=/data/downloads
       - HASH_DB_PATH=/data/hash_cache.db
       - MODERATION_DB_PATH=/data/moderation.db
       - TELETHON_SESSION=/data/userbot
       - TELETHON_BOT_SESSION=/data/bot
-
-volumes:
-  bot-data:

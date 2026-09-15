@@ -31,6 +31,15 @@ Run:
 python bot.py
 ```
 
+Generate a Telegram user session file on the host machine:
+
+```bash
+TELETHON_API_ID=123456 TELETHON_API_HASH=your_hash TELETHON_PHONE=+15551234567 \
+	python generate_telethon_session.py --session /path/to/deploy/data/userbot
+```
+
+If you are using the VPS bind mount, point `--session` at the host data directory you created for the container, for example `DEPLOY_PATH/data/userbot`.
+
 ## Auto forwarding
 
 Enable bi-directional auto forwarding between Telegram and Bale for a single user.

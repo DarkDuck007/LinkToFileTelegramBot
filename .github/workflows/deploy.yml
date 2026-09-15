@@ -60,6 +60,11 @@ jobs:
             ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
             "DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}' bash -s" << 'ENVEOF'
           set -e
+          HOST_UID=$(id -u)
+          HOST_GID=$(id -g)
+          HOST_DATA_DIR="${DEPLOY_PATH}/data"
+          mkdir -p "$HOST_DATA_DIR/downloads"
+          chown "$HOST_UID:$HOST_GID" "$HOST_DATA_DIR" "$HOST_DATA_DIR/downloads"
           cat > "$DEPLOY_PATH/.env" << 'EOF'
           TELETHON_API_ID=${{ secrets.TELETHON_API_ID }}
           TELETHON_API_HASH=${{ secrets.TELETHON_API_HASH }}
@@ -81,6 +86,8 @@ jobs:
           TELETHON_SESSION=/data/userbot
           TELETHON_BOT_SESSION=/data/bot
           EOF
+          printf 'HOST_UID=%s\nHOST_GID=%s\nHOST_DATA_DIR=%s\n' \
+            "$HOST_UID" "$HOST_GID" "$HOST_DATA_DIR" >> "$DEPLOY_PATH/.env"
           echo "[env] .env written to $DEPLOY_PATH/.env"
           ENVEOF
           echo "::endgroup::"
@@ -98,6 +105,7 @@ jobs:
           SFTP_HOST="${{ secrets.SFTP_HOST }}"
           SFTP_USER="${{ secrets.SFTP_USER }}"
           SFTP_PATH="${{ secrets.SFTP_PATH }}"
+          HOST_DATA_DIR="${DEPLOY_PATH}/data"
           STAGING_DIR=$(mktemp -d)
 
           if ! command -v sshpass &>/dev/null; then
@@ -105,8 +113,8 @@ jobs:
             exit 1
           fi
 
-          echo "[sftp] Ensuring Docker volume exists..."
-          docker volume inspect linktofile_bot-data &>/dev/null || docker volume create linktofile_bot-data
+          echo "[sftp] Ensuring host data directory exists..."
+          mkdir -p "$HOST_DATA_DIR"
 
           echo "[sftp] Pulling files from ${SFTP_HOST}:${SFTP_PATH} to staging..."
           export SSHPASS='${{ secrets.SFTP_PASSWORD }}'
@@ -120,11 +128,10 @@ jobs:
 
           FILE_COUNT=$(find "$STAGING_DIR" -maxdepth 1 -type f | wc -l)
           if [ "$FILE_COUNT" -gt 0 ]; then
-            echo "[sftp] Copying $FILE_COUNT file(s) into Docker volume via container..."
-            docker run --rm \
-              -v linktofile_bot-data:/data \
-              -v "$STAGING_DIR":/src:ro \
-              alpine sh -c 'cp /src/* /data/ && chown -R 999:999 /data/ && ls -la /data/'
+            echo "[sftp] Copying $FILE_COUNT file(s) into host data directory..."
+            cp -f "$STAGING_DIR"/* "$HOST_DATA_DIR/"
+            chmod 600 "$HOST_DATA_DIR"/*.session "$HOST_DATA_DIR"/*.db 2>/dev/null || true
+            ls -la "$HOST_DATA_DIR/"
           else
             echo "[sftp] No files to copy, skipping."
           fi
@@ -142,6 +149,7 @@ jobs:
             "DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}' bash -s" << 'DEPLOYEOF'
           set -e
           cd "$DEPLOY_PATH"
+          mkdir -p "$DEPLOY_PATH/data/downloads"
           echo "[deploy] Working directory: $(pwd)"
           echo "[deploy] Stopping existing containers..."
           docker compose down --timeout 30 || true

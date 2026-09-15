@@ -4,7 +4,11 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends wget && \
     rm -rf /var/lib/apt/lists/*
 
-RUN groupadd -r botuser && useradd -r -g botuser -m botuser
+ARG APP_UID=1000
+ARG APP_GID=1000
+
+RUN groupadd -g "$APP_GID" botuser && \
+    useradd -u "$APP_UID" -g botuser -m botuser
 
 WORKDIR /app
 
