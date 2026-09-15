@@ -1557,6 +1557,12 @@ def is_telegram_document(message: events.NewMessage.Event | None) -> bool:
     return bool(message.message.document)
 
 
+def is_telegram_uploaded_file(message: events.NewMessage.Event | None) -> bool:
+    if not message or not message.message:
+        return False
+    return bool(message.message.photo or message.message.document)
+
+
 async def download_telegram_media(
     bot_client: TelegramClient, chat_id: int, message_id: int, dest_dir: Path
 ) -> Path | None:
@@ -3351,9 +3357,9 @@ async def main() -> None:
             )
             return
         key = extract_key(text)
-        if event.message and event.message.media and key:
+        if is_telegram_uploaded_file(event) and key:
             await handle_telegram_key_store(event, key)
-        if event.message and event.message.media:
+        if is_telegram_uploaded_file(event):
             if bale_api is not None and event.sender_id is not None:
                 link = await db_get_auto_link_by_tg(event.sender_id)
                 if link:
