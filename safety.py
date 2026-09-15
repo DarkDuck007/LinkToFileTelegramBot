@@ -3,7 +3,7 @@ import ipaddress
 import re
 import socket
 import urllib.parse
-from pathlib import PathURL
+from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import requests
